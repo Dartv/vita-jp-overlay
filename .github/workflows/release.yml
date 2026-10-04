@@ -1,0 +1,45 @@
+name: Release
+# Runs only for a release tag (v*), or by hand from the Actions tab.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build python3-pil
+      - run: cmake -S . -B build/host -G Ninja && cmake --build build/host
+      - run: ./build/host/vjo-tests
+      - run: python3 tools/test_jpegsw.py
+
+  vita:
+    runs-on: ubuntu-latest
+    container: vitasdk/vitasdk:2026.08
+    steps:
+      - uses: actions/checkout@v4
+      - run: apt-get update && apt-get install -y --no-install-recommends g++ patch
+      - run: WORK=$PWD/.refs/toolchain bash tools/setup_toolchain.sh
+      - run: |
+          export PATH=$PWD/.refs/toolchain/psp2cxml-tool/mbuild:$PATH
+          cmake -S vita -B build/vita && cmake --build build/vita && cmake --build build/vita --target release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VitaJPOverlay
+          path: build/vita/VitaJPOverlay-*.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [host, vita]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: VitaJPOverlay
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: VitaJPOverlay-*.zip

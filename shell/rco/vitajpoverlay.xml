@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Vita JP Overlay resources. Build: psp2cxml-tool vitajpoverlay.xml -->
+<resource version="0.1" type="normal" id="vitajpoverlay_plugin">
+  <pagetable>
+    <page id="vjo_page_overlay">
+      <!-- overlay panel: full screen, 90% black. Opaque bands drawn after the
+           text boxes (later siblings draw on top) cover any text drawn
+           outside them: above the header, between header and body, and in
+           the hint footer. -->
+      <plane style="vjo_style_panel" id="vjo_panel">
+        <layout_hint size="960, 544" />
+        <!-- header and body: wrapped text widgets in a fixed-size box inside a
+             scroll view. The view only clips: its content (the box) never
+             changes size, so it never re-centres or eases the text when the
+             text changes. The text takes the box's width and grows to fit;
+             code positions it inside the box from its laid-out height (top at
+             the box top) and scrolls it. Per-range size and color are set from
+             code. -->
+        <scroll_view style="vjo_style_view" w_sbar_v="vjo_header_sbar_v" w_sbar_h="vjo_header_sbar_h" id="vjo_header_view">
+          <layout_hint size="920, 128" pos="0, 196" />
+          <plane style="vjo_style_clear" id="vjo_header_box">
+            <layout_hint size="920, 128" />
+            <text style="vjo_style_plain" id="vjo_header">
+              <layout_hint adjust="1, 2" />
+            </text>
+          </plane>
+          <scrollbar style="_common_default_style_scrollbar" id="vjo_header_sbar_v">
+            <layout_hint size="0, 0" />
+          </scrollbar>
+          <scrollbar style="_common_default_style_scrollbar" id="vjo_header_sbar_h">
+            <layout_hint size="0, 0" />
+          </scrollbar>
+        </scroll_view>
+        <scroll_view style="vjo_style_view" w_sbar_v="vjo_body_sbar_v" w_sbar_h="vjo_body_sbar_h" id="vjo_body_view">
+          <layout_hint size="920, 320" pos="0, -64" />
+          <plane style="vjo_style_clear" id="vjo_body_box">
+            <layout_hint size="920, 320" />
+            <text style="vjo_style_plain" id="vjo_body">
+              <layout_hint adjust="1, 2" />
+            </text>
+          </plane>
+          <scrollbar style="_common_default_style_scrollbar" id="vjo_body_sbar_v">
+            <layout_hint size="0, 0" />
+          </scrollbar>
+          <scrollbar style="_common_default_style_scrollbar" id="vjo_body_sbar_h">
+            <layout_hint size="0, 0" />
+          </scrollbar>
+        </scroll_view>
+        <plane style="vjo_style_band" id="vjo_band_top">
+          <layout_hint size="960, 12" pos="0, 266" />
+        </plane>
+        <plane style="vjo_style_band" id="vjo_band_mid">
+          <layout_hint size="960, 34" pos="0, 113" />
+        </plane>
+        <plane style="vjo_style_separator" id="vjo_separator">
+          <layout_hint size="920, 2" pos="0, 113" />
+        </plane>
+        <plane style="vjo_style_band" id="vjo_band_footer">
+          <layout_hint size="960, 44" pos="0, -250" />
+        </plane>
+        <rich_text style="vjo_style_text" id="vjo_hint">
+          <layout_hint size="920, 30" pos="0, -250" />
+        </rich_text>
+      </plane>
+      <!-- region selector: dimmed game, translucent selection rectangle -->
+      <plane style="vjo_style_dim" id="vjo_region_layer">
+        <layout_hint size="960, 544" />
+        <plane style="vjo_style_region" id="vjo_region_rect">
+          <layout_hint size="2, 2" />
+        </plane>
+        <rich_text style="vjo_style_text" id="vjo_region_hint">
+          <layout_hint size="920, 30" pos="0, 250" />
+        </rich_text>
+      </plane>
+    </page>
+  </pagetable>
+
+  <templatetable />
+
+  <styletable>
+    <style_plane color="0, 0, 0, 0.9" planeobj="vjo_panel_obj" id="vjo_style_panel">
+      <planeobj id="vjo_panel_obj" />
+    </style_plane>
+    <style_plane color="0.03, 0.03, 0.04, 1" planeobj="vjo_band_obj" id="vjo_style_band">
+      <planeobj id="vjo_band_obj" />
+    </style_plane>
+    <style_plane color="0, 0, 0, 0" planeobj="vjo_clear_obj" id="vjo_style_clear">
+      <planeobj id="vjo_clear_obj" />
+    </style_plane>
+    <style_plane color="1, 1, 1, 0.3" planeobj="vjo_sep_obj" id="vjo_style_separator">
+      <planeobj id="vjo_sep_obj" />
+    </style_plane>
+    <style_plane color="0, 0, 0, 0.35" planeobj="vjo_dim_obj" id="vjo_style_dim">
+      <planeobj id="vjo_dim_obj" />
+    </style_plane>
+    <style_plane color="1, 0.82, 0.29, 0.35" planeobj="vjo_region_obj" id="vjo_style_region">
+      <planeobj id="vjo_region_obj" />
+    </style_plane>
+    <style_scroll_view color="0, 0, 0, 0" sbar_v_margin="0, 0, 4" id="vjo_style_view" />
+    <style_text textobj="vjo_plain_obj" id="vjo_style_plain">
+      <textobj font_size="20" color="1, 1, 1, 1" align_x="0" align_y="0" text_align="0"
+               word_wrap="1" kinsoku="1" id="vjo_plain_obj" />
+    </style_text>
+    <style_rich_text bg_obj="vjo_text_bg" id="vjo_style_text">
+      <planeobj color="0, 0, 0, 0" id="vjo_text_bg" />
+    </style_rich_text>
+  </styletable>
+
+  <stringtable />
+  <texturetable />
+  <filetable />
+</resource>

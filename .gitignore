@@ -1,0 +1,5 @@
+build/
+.refs/
+.DS_Store
+third_party/bearssl/build/
+*.o

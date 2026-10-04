@@ -1,0 +1,23 @@
+VitaJPOverlay_Kernel:
+  attributes: 0
+  version:
+    major: 1
+    minor: 0
+  main:
+    start: module_start
+    stop: module_stop
+  libraries:
+    VitaJPOverlayForUser:
+      syscall: true
+      functions:
+        - vjoGetVersion
+        - vjoRegisterShell
+        - vjoWaitEvent
+        - vjoGetState
+        - vjoSetRegion
+        - vjoSetTrigger
+        - vjoSetGameActive
+        - vjoSetInputBlock
+        - vjoPollInput
+        - vjoRequestCapture
+        - vjoReadRaw

@@ -1,0 +1,86 @@
+吾輩は猫である。 
+名前はまだ無い。 
+どこで生れたかとんと見当がつかぬ。
+────────────────────────
+吾輩は猫である (わがはいはねこである) 92308
+I Am a Cat (1906 novel by Natsume Soseki)
+
+名前 (なまえ) 250
+name
+given name; first name
+
+は 2
+indicates sentence topic
+indicates contrast with another option (stated or unstated)
+adds emphasis
+
+まだ 78
+still; as yet; only
+(not) yet
+more; (more) still
+at least; comparatively; relatively
+unfinished; incomplete; not yet done
+
+無い (ない) 2722
+nonexistent; not being (there)
+unowned; not had; unpossessed
+unique
+not; impossible; won't happen
+not
+to not be; to have not
+
+どこ 107
+where; what place
+how much (long, far); what extent
+
+で 7
+at; in
+at; when
+by; with
+so; therefore; (and) then; accordingly
+by the way; incidentally; now then; well
+
+生れる (うまれる) 48864
+to be born
+
+か 12
+indicates a question
+indicates an embedded question; indicates an indirect question
+or; whether or not; either ... or ...
+some- (e.g. something, someone)
+hmm; huh; I wonder (if, why, etc.); it might (be); maybe; perhaps it's (because of); could it be (that)
+shouldn't we ...?; why don't we ...?; what about ...?; how about ...?; let's ...; may I ...?; could you ...?
+some (amount); roughly; about; circa; more or less; or so
+won't you ...?; why don't you ...?; couldn't you (e.g. have done differently)?; shouldn't you ...?
+why should ...?; why would ...?; would I (really) ...?; who could have (guessed, foreseen, etc.) ...?; how could ...?; how should ...?
+OK?; (you) understand?; got it?; really?; right?; didn't (I, you, etc.) ...?
+oh; wow; how (incredible, strongly, badly, etc.)
+come to think of ...; ... you say?; ah; now that (you, it, etc.) ...
+very
+-al; -ial; -ic; -ical; -ish; -y
+in that way
+
+と 6
+if; when
+and; as well as
+with; together with; accompanied by
+used for quoting (thoughts, speech, etc.)
+when; once
+with; against; to
+indicates manner of action; forms an adverb of manner
+with; to (as in "similar to"); from (as in "different from"); than
+when; as; as soon as; upon; the moment that; after
+as; to
+marks the outcome of a change; marks the result of an action
+what's this?; what do you mean ...?; how can you ...
+... I think; I guess ...; it's that ...; ... you mean?; ... you're saying?
+... right; ... OK; ... there; let's see...; ... check
+be it ... or ...; no matter (what, who, etc.)
+indicates the order something is done in
+(not) even; (less) than; (not) as much as; within
+like; as
+(and) then; and; thereupon; whereupon
+indicates a question
+
+見当がつく (けんとうがつく) 12942
+to have a (rough) idea (of what the situation is)
