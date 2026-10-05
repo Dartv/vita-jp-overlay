@@ -18,7 +18,7 @@ set(CMAKE_C_EXTENSIONS ON)
 include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
-set(VJO_VERSION "0.2")
+set(VJO_VERSION "0.3")
 
 # ---------------- kernel ----------------
 add_executable(VitaJPOverlay_Kernel
@@ -29,7 +29,8 @@ add_executable(VitaJPOverlay_Kernel
   ${ROOT}/kernel/display.c
   ${ROOT}/kernel/input.c
   ${ROOT}/kernel/lifecycle.c
-  ${ROOT}/kernel/foreground.c)
+  ${ROOT}/kernel/foreground.c
+  ${ROOT}/kernel/triggers.c)
 target_compile_options(VitaJPOverlay_Kernel PRIVATE -Wall -Wextra -Wno-unused-parameter -O2 -std=gnu99 -fno-builtin)
 target_link_options(VitaJPOverlay_Kernel PRIVATE -nostdlib -Wl,-q)
 target_link_libraries(VitaJPOverlay_Kernel
@@ -73,6 +74,7 @@ add_executable(VitaJPOverlay_Shell
   ${ROOT}/shell/boot.c
   ${ROOT}/shell/main.cpp
   ${ROOT}/shell/overlay.cpp
+  ${ROOT}/shell/strip.cpp
   ${ROOT}/shell/worker.c
   ${ROOT}/shell/anki.c
   ${ROOT}/shell/platform_vita.c

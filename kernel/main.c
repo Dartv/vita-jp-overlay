@@ -313,13 +313,18 @@ int vjoSetGameActive(int pid, int active)
     return ret;
 }
 
-int vjoSetTrigger(int trigger_id)
+int vjoSetTriggers(int toggle, int subtitle)
 {
     if (!caller_ok())
         return VJO_ERR_PERM;
-    if (trigger_id < 0 || trigger_id >= VJO_TRIGGER_COUNT)
+    if (toggle < 0 || toggle >= VJO_TRIGGER_COUNT || subtitle < 0 || subtitle >= VJO_TRIGGER_COUNT ||
+        toggle == subtitle)
         return -1;
-    g.trigger = trigger_id;
+    if (g.trigger[TRIG_TOGGLE] != toggle || g.trigger[TRIG_SUBTITLE] != subtitle) {
+        g.trigger[TRIG_TOGGLE] = toggle;
+        g.trigger[TRIG_SUBTITLE] = subtitle;
+        g.trigger_gen++;
+    }
     return 0;
 }
 
@@ -427,7 +432,8 @@ int module_start(SceSize argc, const void *args)
     (void)argc;
     (void)args;
     memset(&g, 0, sizeof(g));
-    g.trigger = VJO_TRIGGER_L_R;
+    g.trigger[TRIG_TOGGLE] = VJO_TRIGGER_L_R;
+    g.trigger[TRIG_SUBTITLE] = VJO_TRIGGER_SELECT_R;
     g.evf = ksceKernelCreateEventFlag("VjoEvents", SCE_EVENT_WAITMULTIPLE, 0, NULL);
     g.ievf = ksceKernelCreateEventFlag("VjoInternal", 0, 0, NULL);
     g.lock = ksceKernelCreateMutex("VjoLock", 0, 0, NULL);

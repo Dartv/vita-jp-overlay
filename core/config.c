@@ -58,6 +58,7 @@ void vjo_config_defaults(VjoConfig *c)
     c->font_size_ja = 18;
     c->font_size_en = 14;
     c->toggle_button = VJO_TRIGGER_L_R;
+    c->subtitle_button = VJO_TRIGGER_SELECT_R;
     c->ocr_mode = VJO_OCR_AUTO;
     vjo_snprintf(c->anki_deck, sizeof(c->anki_deck), "Default");
     vjo_snprintf(c->anki_note_type, sizeof(c->anki_note_type), "Lapis");
@@ -90,6 +91,12 @@ const char *vjo_config_default_text(void)
            "; touchpad (buttons are hidden from the game; rear taps are not):\n"
            "; l+r | select | start | select+l | select+r | rear_double_tap\n"
            "toggle_button = l+r\n"
+           "\n"
+           "; Turns subtitles on/off: the recognized text in a strip at the top of the\n"
+           "; screen while the game runs. Same values as toggle_button, but not the same\n"
+           "; one. When one is part of the other (select and select+r), the shorter one\n"
+           "; acts on release.\n"
+           "subtitle_button = select+r\n"
            "\n"
            "; auto: recognize text in the background when the region changes (instant overlay)\n"
            "; on_press: recognize only when the overlay is opened\n"
@@ -263,6 +270,17 @@ static void set_font(VjoConfig *c, const char *key, const char *val, int *dst)
         warn(c, "%s: invalid value '%s' (8-40)", key, val);
 }
 
+static void set_trigger(VjoConfig *c, const char *key, const char *val, int *dst)
+{
+    for (int i = 0; i < VJO_TRIGGER_COUNT; i++) {
+        if (vjo_ieq(val, trigger_names[i])) {
+            *dst = i;
+            return;
+        }
+    }
+    warn(c, "%s: invalid value '%s'", key, val);
+}
+
 static void set_kv(VjoConfig *c, const char *key, const char *val)
 {
     const StrSetting *ss;
@@ -276,7 +294,8 @@ static void set_kv(VjoConfig *c, const char *key, const char *val)
             warn(c, "%s: invalid value '%s'", key, val);
     } else if ((d = api_key_dict(key)) >= 0) {
         set_str(c, key, val, c->api_key[d], sizeof(c->api_key[d]));
-    } else if (vjo_ieq(key, "frequency_filter") || vjo_ieq(key, "font_size") || vjo_ieq(key, "hw_jpeg")) {
+    } else if (vjo_ieq(key, "frequency_filter") || vjo_ieq(key, "font_size") || vjo_ieq(key, "hw_jpeg") ||
+               vjo_ieq(key, "combo_delay_ms")) {
         /* removed settings (tools/migrate_config.py REMOVED): no warning */
     } else if (vjo_ieq(key, "non_japanese_filter")) {
         if (vjo_ieq(val, "lines"))
@@ -290,15 +309,9 @@ static void set_kv(VjoConfig *c, const char *key, const char *val)
     } else if (vjo_ieq(key, "font_size_en")) {
         set_font(c, key, val, &c->font_size_en);
     } else if (vjo_ieq(key, "toggle_button")) {
-        int found = 0;
-        for (int i = 0; i < VJO_TRIGGER_COUNT; i++) {
-            if (vjo_ieq(val, trigger_names[i])) {
-                c->toggle_button = i;
-                found = 1;
-            }
-        }
-        if (!found)
-            warn(c, "%s: invalid value '%s'", key, val);
+        set_trigger(c, key, val, &c->toggle_button);
+    } else if (vjo_ieq(key, "subtitle_button")) {
+        set_trigger(c, key, val, &c->subtitle_button);
     } else if (vjo_ieq(key, "ocr_mode")) {
         if (vjo_ieq(val, "auto"))
             c->ocr_mode = VJO_OCR_AUTO;
@@ -389,5 +402,11 @@ void vjo_config_parse(VjoConfig *c, const char *text, size_t len)
         memcpy(val, line + s, e - s);
         val[e - s] = '\0';
         set_kv(c, key, val);
+    }
+    /* The toggle keeps its button (it was there first). */
+    if (c->toggle_button == c->subtitle_button) {
+        c->subtitle_button = c->toggle_button == VJO_TRIGGER_SELECT_R ? VJO_TRIGGER_SELECT_L : VJO_TRIGGER_SELECT_R;
+        warn(c, "toggle_button and subtitle_button are both %s: subtitle_button is %s",
+             trigger_names[c->toggle_button], trigger_names[c->subtitle_button]);
     }
 }

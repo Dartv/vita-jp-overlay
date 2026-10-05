@@ -19,6 +19,7 @@
 #include "render.h"
 #include "replay.h"
 #include "textfilter.h"
+#include "triggers.h"
 #include "utf.h"
 
 static uint8_t g_mem[4u << 20];
@@ -542,6 +543,7 @@ static void test_config(void)
                       "font_size_ja = 99\n"
                       "font_size_en = 10\n"
                       "toggle_button = Select+R\n"
+                      "subtitle_button = select\n"
                       "ocr_mode = on_press\n"
                       "log_host = 192.168.1.5\n"
                       "log_file = on\n"
@@ -559,7 +561,7 @@ static void test_config(void)
     TEST_CHECK(c.non_japanese_filter == VJO_FILTER_NONE);
     TEST_CHECK(c.font_size_ja == 18); /* invalid -> default */
     TEST_CHECK(c.font_size_en == 10);
-    TEST_CHECK(c.toggle_button == VJO_TRIGGER_SELECT_R);
+    TEST_CHECK(c.toggle_button == VJO_TRIGGER_SELECT_R && c.subtitle_button == VJO_TRIGGER_SELECT);
     TEST_CHECK(c.ocr_mode == VJO_OCR_ON_PRESS);
     TEST_CHECK(!strcmp(c.log_host, "192.168.1.5"));
     TEST_CHECK(c.log_file == 1);
@@ -575,12 +577,28 @@ static void test_config(void)
         vjo_config_parse(&d, t, strlen(t));
         TEST_CHECK(d.n_warnings == 0);
         TEST_CHECK(d.dictionary == VJO_DICT_JITEN && d.ocr_mode == VJO_OCR_AUTO && d.api_key[VJO_DICT_JPDB][0] == 0 &&
-                   d.font_size_ja == 18 && d.font_size_en == 14);
+                   d.font_size_ja == 18 && d.font_size_en == 14 &&
+                   d.toggle_button == VJO_TRIGGER_L_R && d.subtitle_button == VJO_TRIGGER_SELECT_R);
     }
+
+    /* the same button for both: the toggle keeps it */
+    {
+        const char *same = "toggle_button = select+r\n";
+        vjo_config_defaults(&c);
+        vjo_config_parse(&c, same, strlen(same));
+        TEST_CHECK(c.toggle_button == VJO_TRIGGER_SELECT_R && c.subtitle_button == VJO_TRIGGER_SELECT_L &&
+                   c.n_warnings == 1);
+        same = "toggle_button = start\nsubtitle_button = start\n";
+        vjo_config_defaults(&c);
+        vjo_config_parse(&c, same, strlen(same));
+        TEST_CHECK(c.toggle_button == VJO_TRIGGER_START && c.subtitle_button == VJO_TRIGGER_SELECT_R &&
+                   c.n_warnings == 1);
+    }
+
 
     /* settings renamed/removed since earlier releases, as in tools/migrate_config.py */
     {
-        const char *old = "api_key = k1\nfont_size = 20\nhw_jpeg = on\nfrequency_filter = 3\n";
+        const char *old = "api_key = k1\nfont_size = 20\nhw_jpeg = on\nfrequency_filter = 3\ncombo_delay_ms = 0\n";
         vjo_config_defaults(&c);
         vjo_config_parse(&c, old, strlen(old));
         TEST_CHECK(!strcmp(c.api_key[VJO_DICT_JPDB], "k1"));
@@ -602,20 +620,49 @@ static void test_config(void)
 
 static void test_regions(void)
 {
-#define P(s, g) vjo_region_parse(s, strlen(s), g)
+#define P(s, t, g) vjo_region_parse(s, strlen(s), t, g)
     VjoRect r = {100, 200, 30000, 40000}, g;
-    char line[64];
-    int n = vjo_region_format(line, sizeof(line), &r);
+    char line[64], *t;
+    int n = vjo_region_format(line, sizeof(line), VJO_REGION_FALLBACK, &r);
     TEST_CHECK(n > 0 && !strcmp(line, "region = 100,200,30000,40000\n"));
-    TEST_CHECK(vjo_region_parse(line, (size_t)n, &g) == 1 && !memcmp(&g, &r, sizeof(r)));
-    TEST_CHECK(vjo_region_format(line, 10, &r) == -1);
-    TEST_CHECK(P(" region=1, 2 ,3,4\r\n", &g) == 1 && g.x == 1 && g.h == 4);
-    TEST_CHECK(P("region = 1,2,0,3\n", &g) == 0);        /* zero size */
-    TEST_CHECK(P("region = 60000,2,6000,3\n", &g) == 0); /* off screen */
-    TEST_CHECK(P("region = 1,2,3\n", &g) == 0);
-    TEST_CHECK(P("region = 1,2,3,4x\n", &g) == 0);
-    TEST_CHECK(P("PCSG00123 = 1,2,3,4\n", &g) == 0);
-    TEST_CHECK(P("", &g) == 0);
+    TEST_CHECK(vjo_region_parse(line, (size_t)n, NULL, &g) == VJO_REGION_ALL && !memcmp(&g, &r, sizeof(r)));
+    TEST_CHECK(vjo_region_format(line, 10, VJO_REGION_FALLBACK, &r) == -1);
+    TEST_CHECK(P(" region=1, 2 ,3,4\r\n", NULL, &g) == VJO_REGION_ALL && g.x == 1 && g.h == 4);
+    TEST_CHECK(P("region = 1,2,0,3\n", NULL, &g) == 0);        /* zero size */
+    TEST_CHECK(P("region = 60000,2,6000,3\n", NULL, &g) == 0); /* off screen */
+    TEST_CHECK(P("region = 1,2,3\n", NULL, &g) == 0);
+    TEST_CHECK(P("region = 1,2,3,4x\n", NULL, &g) == 0);
+    TEST_CHECK(P("PCSG00123 = 1,2,3,4\n", NULL, &g) == 0);
+    TEST_CHECK(P("", "PCSG00123", &g) == 0);
+
+    /* per game: the game's line wins, wherever it is; else the fallback */
+    {
+        const char *ini = "region = 1,1,1,1\nPCSG00123 = 2,2,2,2\nPCSG0012 = 3,3,3,3\n";
+        TEST_CHECK(P(ini, "PCSG00123", &g) == VJO_REGION_GAME && g.x == 2);
+        TEST_CHECK(P(ini, "PCSG0012", &g) == VJO_REGION_GAME && g.x == 3);
+        TEST_CHECK(P(ini, "PCSB00001", &g) == VJO_REGION_ALL && g.x == 1);
+        TEST_CHECK(P("PCSG00123 = 2,2,0,2\nregion = 1,1,1,1\n", "PCSG00123", &g) == VJO_REGION_ALL);
+        TEST_CHECK(P("region = 1,1,1,1\nPCSG00123 =  full \r\n", "PCSG00123", &g) == VJO_REGION_GAME && g.w == 0);
+        TEST_CHECK(P("PCSG00123 = fullx\n", "PCSG00123", &g) == 0);
+        TEST_CHECK(P("region = 1,1,1,1", "PCSG00123", &g) == VJO_REGION_ALL); /* no final newline */
+    }
+
+    /* update: replace, add, remove; other lines kept */
+    setup();
+    {
+        VjoRect q = {5, 6, 7, 8};
+        const char *ini = "region = 1,1,1,1\n; note\nPCSG00123 = 2,2,2,2";
+        t = vjo_region_update(&A, ini, strlen(ini), "PCSG00123", &q);
+        TEST_CHECK(t && !strcmp(t, "region = 1,1,1,1\n; note\nPCSG00123 = 5,6,7,8\n"));
+        t = vjo_region_update(&A, ini, strlen(ini), "PCSB00001", &q);
+        TEST_CHECK(t && !strcmp(t, "region = 1,1,1,1\n; note\nPCSG00123 = 2,2,2,2\nPCSB00001 = 5,6,7,8\n"));
+        q.w = 0; /* full screen */
+        t = vjo_region_update(&A, ini, strlen(ini), "PCSG00123", &q);
+        TEST_CHECK(t && !strcmp(t, "region = 1,1,1,1\n; note\nPCSG00123 = full\n"));
+        q.w = 7;
+        t = vjo_region_update(&A, "", 0, "PCSG00123", &q);
+        TEST_CHECK(t && !strcmp(t, "PCSG00123 = 5,6,7,8\n"));
+    }
 #undef P
 }
 
@@ -856,6 +903,8 @@ static void test_fixtures(void)
                     "%s has no dictionary recording (jiten.json or jpdb.json)", e->d_name);
         vjo_replay_overlay(&A, &files, dir, &cfg, &od);
         TEST_CHECK(od.failed_stage != VJO_STAGE_OCR);
+        /* the subtitle (after the OCR phase) is the full overlay's header */
+        TEST_CHECK(od.sentence && !strcmp(od.sentence, od.list.header));
         got = vjo_render_overlay(&A, &od);
         TEST_CHECK(!strcmp(got, expected));
         TEST_MSG("fixture %s differs:\n--- got ---\n%s\n--- expected ---\n%s", e->d_name, got, expected);
@@ -863,6 +912,92 @@ static void test_fixtures(void)
     }
     closedir(d);
     TEST_CHECK_(n > 0, "%d fixtures", n);
+}
+
+/* kernel/triggers.c (pad masks as SCE_CTRL_*) */
+#define B_SELECT 0x1u
+#define B_L 0x100u
+#define B_R 0x200u
+
+static void test_trigger_edges(void)
+{
+    TrigEdge sel = {0, 0}, selr = {0, 0}, lr = {0, 0};
+    const uint32_t s = B_SELECT, sr = B_SELECT | B_R;
+    /* no overlap: fires on press, once */
+    TEST_CHECK(trig_edge(&lr, B_L | B_R, sr, B_L) == 0);
+    TEST_CHECK(trig_edge(&lr, B_L | B_R, sr, B_L | B_R) == 1);
+    TEST_CHECK(trig_edge(&lr, B_L | B_R, sr, B_L | B_R) == 0);
+    TEST_CHECK(trig_edge(&lr, B_L | B_R, sr, 0) == 0);
+    /* select alone: the subset fires on release */
+    TEST_CHECK(trig_edge(&sel, s, sr, s) == 0);
+    TEST_CHECK(trig_edge(&sel, s, sr, 0) == 1);
+    /* select, then R: only select+r fires (on press) */
+    TEST_CHECK(trig_edge(&sel, s, sr, s) == 0 && trig_edge(&selr, sr, s, s) == 0);
+    TEST_CHECK(trig_edge(&sel, s, sr, sr) == 0 && trig_edge(&selr, sr, s, sr) == 1);
+    TEST_CHECK(trig_edge(&sel, s, sr, s) == 0 && trig_edge(&selr, sr, s, s) == 0);
+    TEST_CHECK(trig_edge(&sel, s, sr, 0) == 0 && trig_edge(&selr, sr, s, 0) == 0);
+    /* R, then select */
+    TEST_CHECK(trig_edge(&sel, s, sr, B_R) == 0 && trig_edge(&selr, sr, s, B_R) == 0);
+    TEST_CHECK(trig_edge(&sel, s, sr, sr) == 0 && trig_edge(&selr, sr, s, sr) == 1);
+    TEST_CHECK(trig_edge(&sel, s, sr, 0) == 0 && trig_edge(&selr, sr, s, 0) == 0);
+    /* the next select tap fires again */
+    TEST_CHECK(trig_edge(&sel, s, sr, s) == 0 && trig_edge(&sel, s, sr, 0) == 1);
+    /* no buttons (rear double tap) never fires */
+    TEST_CHECK(trig_edge(&lr, 0, sr, 0xFFFFu) == 0);
+}
+
+static void test_trigger_filter(void)
+{
+    TrigConfig c = {{B_L | B_R, B_SELECT | B_R}, {0, 0}, 0};
+    TrigHold h[TRIG_COUNT];
+    int64_t t = 1000000;
+
+    /* no delay: hidden only while the whole combo is held */
+    TEST_CHECK(trig_filter(&c, NULL, B_L, t) == B_L);
+    TEST_CHECK(trig_filter(&c, NULL, B_L | B_R | 0x4000u, t) == 0x4000u);
+    c.single[TRIG_SUBTITLE] = 1;
+    c.mask[TRIG_SUBTITLE] = B_SELECT;
+    TEST_CHECK(trig_filter(&c, NULL, B_SELECT | 0x4000u, t) == 0x4000u);
+
+    /* delay 50 ms: l+r pressed L first never shows L */
+    c.mask[TRIG_SUBTITLE] = B_SELECT | B_R;
+    c.single[TRIG_SUBTITLE] = 0;
+    c.delay_us = 50000;
+    memset(h, 0, sizeof(h));
+    TEST_CHECK(trig_filter(&c, h, B_L, t) == 0);
+    TEST_CHECK(trig_filter(&c, h, B_L, t + 16000) == 0);
+    TEST_CHECK(trig_filter(&c, h, B_L | B_R, t + 32000) == 0);
+    TEST_CHECK(trig_filter(&c, h, B_L, t + 200000) == 0); /* held over: still hidden */
+    TEST_CHECK(trig_filter(&c, h, 0, t + 216000) == 0);
+    TEST_CHECK(trig_filter(&c, h, 0, t + 232000) == 0);  /* no replay */
+
+    /* L held alone: reaches the game after the delay */
+    t += 1000000;
+    TEST_CHECK(trig_filter(&c, h, B_L, t) == 0);
+    TEST_CHECK(trig_filter(&c, h, B_L, t + 49000) == 0);
+    TEST_CHECK(trig_filter(&c, h, B_L, t + 50000) == B_L);
+    TEST_CHECK(trig_filter(&c, h, 0, t + 66000) == 0);
+
+    /* a short L tap is replayed after its release, for at least two frames */
+    t += 1000000;
+    TEST_CHECK(trig_filter(&c, h, B_L, t) == 0);
+    TEST_CHECK(trig_filter(&c, h, 0, t + 16000) == B_L);
+    TEST_CHECK(trig_filter(&c, h, 0, t + 60000) == B_L);
+    TEST_CHECK(trig_filter(&c, h, 0, t + 16000 + 50000) == 0);
+
+    /* select+r (the other trigger) shares R: l+r does not replay it */
+    t += 1000000;
+    TEST_CHECK(trig_filter(&c, h, B_SELECT, t) == 0);
+    TEST_CHECK(trig_filter(&c, h, B_SELECT | B_R, t + 16000) == 0);
+    TEST_CHECK(trig_filter(&c, h, 0, t + 32000) == 0);
+    TEST_CHECK(trig_filter(&c, h, 0, t + 48000) == 0);
+    /* nor when R is let go first */
+    t += 1000000;
+    TEST_CHECK(trig_filter(&c, h, B_R, t) == 0);
+    TEST_CHECK(trig_filter(&c, h, B_SELECT | B_R, t + 16000) == 0);
+    TEST_CHECK(trig_filter(&c, h, B_SELECT, t + 32000) == 0);
+    TEST_CHECK(trig_filter(&c, h, 0, t + 48000) == 0);
+    TEST_CHECK(trig_filter(&c, h, 0, t + 64000) == 0);
 }
 
 TEST_LIST = {
@@ -880,6 +1015,8 @@ TEST_LIST = {
     {"entries", test_entries},
     {"entries_surrogates_and_trim", test_entries_surrogates_and_trim},
     {"foreground", test_foreground},
+    {"trigger_edges", test_trigger_edges},
+    {"trigger_filter", test_trigger_filter},
     {"config", test_config},
     {"regions", test_regions},
     {"http", test_http},

@@ -16,21 +16,18 @@
  * DoSnap and Text GetNextDownHit are not used: pressing ▼ with them crashed
  * the console.
  *
+ * Subtitles: a second page, the strip (strip.cpp), shows while the overlay
+ * is closed.
+ *
  * Touch: SceTouch routes the front panel by region, and while a game is in
  * front SceShell's regions are inactive. The region selector activates
  * SceShell's default touch region while it is open (as SceShell's own menus
  * over a game must) and reads the touches through paf's input device. */
 #include <psp2/kernel/modulemgr.h>
-#include <limits>
-#include <paf.h>
 #include <psp2/ctrl.h>
-#include <psp2/kernel/clib.h>
 #include <psp2/kernel/processmgr.h>
 
-extern "C" {
-#include "../core/styled.h"
-#include "shell.h"
-}
+#include "paf_ui.h"
 
 using namespace paf;
 
@@ -42,13 +39,10 @@ void operator delete(void *p, unsigned int)
     sce_paf_free(p);
 }
 
-#define SCREEN_W 960
-#define SCREEN_H 544
 /* Layout (paf coordinates: origin at the screen centre, y up). The header
  * fits its text, 1..HEADER_MAX_LINES lines; the separator and the body follow
  * it, and the body keeps its bottom (shell/rco/vitajpoverlay.xml holds the
  * initial sizes: header 128, body 320). */
-#define BOX_W 920.0f
 #define HEADER_TOP 260.0f
 #define HEADER_MAX_LINES 3
 #define HEADER_SEP_GAP 19.0f /* header bottom -> separator */
@@ -121,55 +115,6 @@ static void set_rich(ui::RichText *w, const char *s)
         w->SetCText(s, sce_paf_strlen(s));
 }
 
-/* math::v2/v4 keep their floats private. */
-static math::v2 v2f(float x, float y)
-{
-    math::v2 v;
-    float f[2] = {x, y};
-    sceClibMemcpy(&v, f, sizeof(f));
-    return v;
-}
-
-static float v2_get(const math::v2 &v, int k)
-{
-    float f[2];
-    sceClibMemcpy(f, &v, sizeof(f));
-    return f[k];
-}
-
-static math::v4 rgba(uint32_t rgb)
-{
-    return math::v4(((rgb >> 16) & 0xFF) / 255.0f, ((rgb >> 8) & 0xFF) / 255.0f, (rgb & 0xFF) / 255.0f, 1.0f);
-}
-
-static void text_set(ui::Text *w, const VjoStyled *st)
-{
-    if (!w)
-        return;
-    w->SetString(paf::wstring((const wchar_t *)st->text, st->len));
-    for (int i = 0; i < st->n_spans; i++) {
-        const VjoSpan *sp = &st->spans[i];
-        /* Point takes a v2 (glyph width, height), as in GrapheneCt's NetStream */
-        w->SetStyleAttribute(graph::TextStyleAttribute_Point, sp->start, sp->len,
-                             v2f((float)sp->px, (float)sp->px));
-        w->SetStyleAttribute(graph::TextStyleAttribute_Color, sp->start, sp->len, rgba(sp->rgb));
-    }
-}
-
-/* Laid-out size of a Text's content; 0 if not laid out yet. */
-static float text_bound(ui::Text *w, int k)
-{
-    math::v2 b;
-    if (!w || w->GetBounds(b) < 0)
-        return 0.0f;
-    return v2_get(b, k);
-}
-
-static float text_height(ui::Text *w)
-{
-    return text_bound(w, 1);
-}
-
 /* Places the pane's Text so that content y = scroll is at the box's top.
  * The widget takes the box's width (adjust 1) with the text left-aligned in
  * it, so x stays 0; its height is the laid-out height (adjust 2) and paf
@@ -217,14 +162,6 @@ static void pane_size(Pane *p, float h, float top)
     if (p->box)
         p->box->SetSize(BOX_W, h, 0.0f);
     p->applied = NOT_PLACED;
-}
-
-static void font_px(int *ja, int *en)
-{
-    vjo_view_lock();
-    *ja = vjo_font_px(g_view.font_size_ja);
-    *en = vjo_font_px(g_view.font_size_en);
-    vjo_view_unlock();
 }
 
 /* Recolors the highlighted word: the old range back to white, the new one
@@ -659,24 +596,32 @@ static void input_region(uint32_t held, uint32_t pressed)
         leave_region_mode();
 }
 
+/* ---- frame ---- */
+
 static void frame_body(unsigned version, unsigned anki_version);
 
 static void frame(void *arg)
 {
-    int want_open;
-    unsigned version, anki_version;
+    int want_open, want_strip;
+    unsigned version, anki_version, strip_version;
     (void)arg;
 
     /* Runs on SceShell's paf main thread every frame: while closed, skip the
      * lock unless an open is published (a store under the lock; a stale read
      * only delays the open by a frame). */
-    if (!s_page && !__atomic_load_n(&g_view.open, __ATOMIC_ACQUIRE))
+    if (!s_page && !vjo_strip_is_open() && !__atomic_load_n(&g_view.open, __ATOMIC_ACQUIRE) &&
+        !__atomic_load_n(&g_view.strip_on, __ATOMIC_ACQUIRE))
         return;
     vjo_view_lock();
     want_open = g_view.open;
     version = g_view.version;
     anki_version = g_view.anki_version;
+    want_strip = g_view.strip_on && g_view.strip_text[0] && !want_open;
+    strip_version = g_view.strip_version;
     vjo_view_unlock();
+
+    /* the strip first: it closes before the overlay opens */
+    vjo_strip_frame(s_plugin, want_strip, strip_version);
 
     if (want_open && !s_page) {
         open_page();

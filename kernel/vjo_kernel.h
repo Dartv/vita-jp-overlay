@@ -11,6 +11,7 @@
 
 #include "../include/vjo_api.h"
 #include "foreground.h" /* IEV_* */
+#include "triggers.h"   /* TRIG_* */
 
 #define CAPTURE_IDLE    0
 #define CAPTURE_PENDING 1     /* the next game frame is copied in the hook */
@@ -66,7 +67,8 @@ typedef struct {
     int64_t last_change_us;
 
     /* input */
-    volatile int trigger;      /* enum VjoTrigger */
+    volatile int trigger[TRIG_COUNT]; /* enum VjoTrigger, by TRIG_* */
+    volatile uint32_t trigger_gen;    /* bumped when trigger changes */
     volatile int input_block;
     volatile SceUID shell_pid;
     volatile uint32_t suppress_mask; /* combo buttons hidden until released */

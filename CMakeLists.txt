@@ -38,8 +38,8 @@ add_executable(vjo-jpegsw host/jpegsw_tool.c)
 target_link_libraries(vjo-jpegsw vjo_host)
 
 enable_testing()
-# kernel/foreground.c: the kernel's foreground state machine (no psp2kern).
-add_executable(vjo-tests host/tests/test_core.c kernel/foreground.c)
+# kernel/foreground.c, kernel/triggers.c: kernel state machines (no psp2kern).
+add_executable(vjo-tests host/tests/test_core.c kernel/foreground.c kernel/triggers.c)
 target_include_directories(vjo-tests PRIVATE third_party/acutest/include kernel)
 target_link_libraries(vjo-tests vjo_host)
 target_compile_definitions(vjo-tests PRIVATE VJO_FIXTURES="${CMAKE_SOURCE_DIR}/host/fixtures")

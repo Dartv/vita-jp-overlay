@@ -48,21 +48,16 @@ static int u16_to_byte(const char *filtered, size_t len, int pos16)
 int vjo_entries_build(VjoArena *a, const char *filtered, const VjoDictResult *r, VjoEntryList *out)
 {
     size_t flen = strlen(filtered);
-    size_t lead = 0;
-    char *header;
+    size_t lead;
+    char *copy, *header;
     int n = r->n_vocab;
 
     /* Header = Java trim() of the filtered text; remember the cut offset. */
-    while (lead < flen && (uint8_t)filtered[lead] <= 0x20)
-        lead++;
-    header = vjo_arena_strndup(a, filtered + lead, flen - lead);
-    if (!header)
+    copy = vjo_arena_strndup(a, filtered, flen);
+    if (!copy)
         return -1;
-    {
-        size_t hl = strlen(header);
-        while (hl && (uint8_t)header[hl - 1] <= 0x20)
-            header[--hl] = '\0';
-    }
+    header = vjo_java_trim(copy);
+    lead = (size_t)(header - copy);
     out->header = header;
     out->entries = NULL;
     out->n_entries = 0;

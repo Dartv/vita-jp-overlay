@@ -73,6 +73,26 @@
         </rich_text>
       </plane>
     </page>
+    <!-- subtitles strip: at the top over the running game; code sizes the
+         strip and the box to the text (sizes here are initial) and shows the
+         strip once the text is laid out. The box keeps side margins (the
+         right one holds the spinner); the text takes its width and grows to
+         fit, centred in it. -->
+    <page id="vjo_page_strip">
+      <plane style="vjo_style_strip" id="vjo_strip">
+        <layout_hint size="960, 48" pos="0, 248" />
+        <plane style="vjo_style_clear" id="vjo_strip_box">
+          <layout_hint size="872, 32" />
+          <text style="vjo_style_plain" id="vjo_strip_text">
+            <layout_hint adjust="1, 2" />
+          </text>
+        </plane>
+        <!-- the system's spinner, while a new sentence is recognized -->
+        <busyindicator style="_common_style_busyindicator_8" texture="_common_texture_busy" id="vjo_strip_busy">
+          <layout_hint size="24, 24" />
+        </busyindicator>
+      </plane>
+    </page>
   </pagetable>
 
   <templatetable />
@@ -80,6 +100,9 @@
   <styletable>
     <style_plane color="0, 0, 0, 0.9" planeobj="vjo_panel_obj" id="vjo_style_panel">
       <planeobj id="vjo_panel_obj" />
+    </style_plane>
+    <style_plane color="0, 0, 0, 0.88" planeobj="vjo_strip_obj" id="vjo_style_strip">
+      <planeobj id="vjo_strip_obj" />
     </style_plane>
     <style_plane color="0.03, 0.03, 0.04, 1" planeobj="vjo_band_obj" id="vjo_style_band">
       <planeobj id="vjo_band_obj" />

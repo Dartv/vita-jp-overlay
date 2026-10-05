@@ -5,7 +5,7 @@
 
 #include <stdint.h>
 
-#define VJO_API_VERSION 5
+#define VJO_API_VERSION 6
 
 /* Normalized rectangle, 0..65535 on both axes. w == 0 means full screen. */
 typedef struct {
@@ -23,12 +23,13 @@ enum VjoTrigger {
 };
 
 /* vjoWaitEvent bits */
-#define VJO_EV_TRIGGER       0x01u /* trigger pressed (edge) */
+#define VJO_EV_TRIGGER       0x01u /* toggle trigger pressed */
 #define VJO_EV_REGION_STABLE 0x02u /* region changed, then unchanged for ~300 ms */
 #define VJO_EV_GAME_START    0x04u
 #define VJO_EV_GAME_EXIT     0x08u
 #define VJO_EV_CAPTURE_DONE  0x10u /* raw rows ready (or failed, see VjoState.capture_result) */
-#define VJO_EV_ALL           0x1Fu
+#define VJO_EV_SUBTITLE      0x20u /* subtitle trigger pressed */
+#define VJO_EV_ALL           0x3Fu
 
 /* VjoState.alloc_status */
 #define VJO_ALLOC_NONE 0  /* no game running */
@@ -75,7 +76,7 @@ int vjoRegisterShell(void);              /* caller becomes the shell if it has V
 int vjoWaitEvent(uint32_t mask, uint32_t *out, SceUInt32 timeout_us); /* 0 timeout = forever */
 int vjoGetState(VjoState *out);          /* set out->size first */
 int vjoSetRegion(const VjoRect *r);      /* NULL = full screen */
-int vjoSetTrigger(int trigger_id);
+int vjoSetTriggers(int toggle, int subtitle); /* enum VjoTrigger each, not equal */
 int vjoSetGameActive(int pid, int active); /* shell: pid is a game (1) or a system app (0) */
 int vjoSetInputBlock(int on);            /* block all game input (not the shell) */
 int vjoPollInput(VjoInput *out);         /* raw pad, unfiltered */
