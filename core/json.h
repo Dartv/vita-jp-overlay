@@ -25,6 +25,8 @@ int vjo_json_obj_get(const VjoJson *j, int obj, const char *key);
 int vjo_json_arr_get(const VjoJson *j, int arr, int k);
 int vjo_json_is_null(const VjoJson *j, int i);
 int vjo_json_is_type(const VjoJson *j, int i, jsmntype_t type);
+/* A true/false token. Returns 0 on success. */
+int vjo_json_bool(const VjoJson *j, int i, int *out);
 /* Parses an integral number token. Returns 0 on success. */
 int vjo_json_int(const VjoJson *j, int i, long *out);
 /* Unescaped, NUL-terminated copy of a string token (or the raw text of a
@@ -32,7 +34,8 @@ int vjo_json_int(const VjoJson *j, int i, long *out);
 char *vjo_json_str(VjoArena *a, const VjoJson *j, int i);
 /* Appends the same text to b. Returns 0, or -1 on a bad index / OOM. */
 int vjo_json_append_str(VjoBuf *b, const VjoJson *j, int i);
-/* Appends s as a quoted JSON string. */
+/* Appends s (n bytes) as a quoted JSON string. */
+int vjo_json_write_stringn(VjoBuf *b, const char *s, size_t n);
 int vjo_json_write_string(VjoBuf *b, const char *s);
 
 #endif

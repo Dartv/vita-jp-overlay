@@ -16,6 +16,10 @@
 #define VJO_RGB_RANK      0x8A94A6u
 #define VJO_RGB_DIM       0xB8C0CCu
 #define VJO_RGB_ERROR     0xFF8A80u
+#define VJO_RGB_OK        0x7CD992u /* in Anki */
+/* The in-Anki mark: √ (JIS X 0208, in the system font; ✓ is not and
+ * renders as "_"). */
+#define VJO_ANKI_MARK     "√"
 
 typedef struct {
     uint32_t start, len; /* UTF-16 units */
@@ -53,7 +57,7 @@ void vjo_styled_header(VjoStyled *s, const VjoEntryList *l, int ja_px);
 int vjo_entry_header_range(const VjoEntryList *l, int entry, uint32_t *start, uint32_t *len);
 
 /* Body: the selected entry — headword and reading at ja_px, rank and
- * meanings at en_px. */
-void vjo_styled_entry(VjoStyled *s, const VjoEntryList *l, int selected, int ja_px, int en_px);
+ * meanings at en_px; a green VJO_ANKI_MARK after the rank when in_anki. */
+void vjo_styled_entry(VjoStyled *s, const VjoEntryList *l, int selected, int ja_px, int en_px, int in_anki);
 
 #endif

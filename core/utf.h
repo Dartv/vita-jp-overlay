@@ -12,6 +12,10 @@ int vjo_utf8_encode(uint32_t cp, char *out);
 /* UTF-16 code units needed for code point cp. */
 static inline int vjo_utf16_units(uint32_t cp) { return cp >= 0x10000 ? 2 : 1; }
 
+/* ASCII case-insensitive equality, and whether s starts with prefix. */
+int vjo_ieq(const char *a, const char *b);
+int vjo_ieq_prefix(const char *s, const char *prefix);
+
 /* Java String.trim(): strips chars <= U+0020 from both ends, in place;
  * returns the (possibly advanced) start pointer. */
 char *vjo_java_trim(char *s);

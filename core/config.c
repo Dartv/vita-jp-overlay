@@ -1,9 +1,11 @@
 #include "config.h"
 
+#include <stddef.h>
 #include <string.h>
 
 #include "port.h"
 #include "textfilter.h"
+#include "utf.h"
 
 static const char *const trigger_names[VJO_TRIGGER_COUNT] = {
     "select", "start", "l+r", "select+l", "select+r", "rear_double_tap",
@@ -36,6 +38,18 @@ const char *vjo_config_api_key(const VjoConfig *c)
     return c->api_key[c->dictionary];
 }
 
+static const struct {
+    const char *key, *def; /* defaults: the Lapis note type */
+} anki_fields[VJO_ANKI_FIELD_COUNT] = {
+    [VJO_ANKI_WORD] = {"anki_field_word", "Expression"},
+    [VJO_ANKI_READING] = {"anki_field_reading", "ExpressionReading"},
+    [VJO_ANKI_FURIGANA] = {"anki_field_furigana", "ExpressionFurigana"},
+    [VJO_ANKI_DEFINITION] = {"anki_field_definition", "MainDefinition"},
+    [VJO_ANKI_SENTENCE] = {"anki_field_sentence", "Sentence"},
+    [VJO_ANKI_PICTURE] = {"anki_field_picture", "Picture"},
+    [VJO_ANKI_FREQUENCY] = {"anki_field_frequency", "FreqSort"},
+};
+
 void vjo_config_defaults(VjoConfig *c)
 {
     memset(c, 0, sizeof(*c));
@@ -45,6 +59,11 @@ void vjo_config_defaults(VjoConfig *c)
     c->font_size_en = 14;
     c->toggle_button = VJO_TRIGGER_L_R;
     c->ocr_mode = VJO_OCR_AUTO;
+    vjo_snprintf(c->anki_deck, sizeof(c->anki_deck), "Default");
+    vjo_snprintf(c->anki_note_type, sizeof(c->anki_note_type), "Lapis");
+    vjo_snprintf(c->anki_tags, sizeof(c->anki_tags), "vita-jp-overlay");
+    for (int i = 0; i < VJO_ANKI_FIELD_COUNT; i++)
+        vjo_snprintf(c->anki_field[i], sizeof(c->anki_field[i]), "%s", anki_fields[i].def);
 }
 
 const char *vjo_config_default_text(void)
@@ -80,7 +99,67 @@ const char *vjo_config_default_text(void)
            "log_host =\n"
            "\n"
            "; Debugging: write ux0:data/VitaJPOverlay/log.txt (max 256 KB + one rotated file): on | off\n"
-           "log_file = off\n";
+           "log_file = off\n"
+           "\n"
+           "; ---- Anki (optional, see README) ----\n"
+           "; × in the overlay adds the selected word to Anki through AnkiConnect on a computer.\n"
+           "; The anki_ values may contain ; and #, so don't put comments after them.\n"
+           "\n"
+           "; The computer running Anki: empty = off, auto = search the local network,\n"
+           "; or its IP address (optionally with :port, default 8765)\n"
+           "anki_host =\n"
+           "\n"
+           "; Deck (created if missing), note type, and tags separated by spaces\n"
+           "anki_deck = Default\n"
+           "anki_note_type = Lapis\n"
+           "anki_tags = vita-jp-overlay\n"
+           "\n"
+           "; The note type's field for each piece of data (empty = not added). Anki checks\n"
+           "; duplicates on the note type's first field, so map the word to that one.\n"
+           "anki_field_word = Expression\n"
+           "anki_field_reading = ExpressionReading\n"
+           "anki_field_furigana = ExpressionFurigana\n"
+           "anki_field_definition = MainDefinition\n"
+           "anki_field_sentence = Sentence\n"
+           "anki_field_picture = Picture\n"
+           "anki_field_frequency = FreqSort\n";
+}
+
+int vjo_anki_endpoint(const char *setting, char *host, size_t cap, int *port)
+{
+    const char *colon = strchr(setting, ':');
+    size_t n = colon ? (size_t)(colon - setting) : strlen(setting);
+    int v = 0;
+    if (!*setting)
+        return VJO_ANKI_OFF;
+    if (vjo_ieq(setting, "auto"))
+        return VJO_ANKI_AUTO;
+    if (n == 0 || n >= cap)
+        return -1;
+    for (size_t i = 0; i < n; i++) {
+        char ch = setting[i];
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '.' ||
+              ch == '-'))
+            return -1;
+    }
+    if (colon) {
+        const char *s = colon + 1;
+        if (!*s)
+            return -1;
+        for (; *s; s++) {
+            if (*s < '0' || *s > '9')
+                return -1;
+            v = v * 10 + (*s - '0');
+            if (v > 65535)
+                return -1;
+        }
+        if (v == 0)
+            return -1;
+    }
+    *port = colon ? v : VJO_ANKI_PORT;
+    memcpy(host, setting, n);
+    host[n] = '\0';
+    return VJO_ANKI_MANUAL;
 }
 
 static void warn(VjoConfig *c, const char *fmt, const char *a, const char *b)
@@ -109,24 +188,10 @@ static int parse_int(const char *s, int *out)
     return 0;
 }
 
-static int ieq(const char *a, const char *b)
-{
-    for (; *a && *b; a++, b++) {
-        char x = *a, y = *b;
-        if (x >= 'A' && x <= 'Z')
-            x = (char)(x + 32);
-        if (y >= 'A' && y <= 'Z')
-            y = (char)(y + 32);
-        if (x != y)
-            return 0;
-    }
-    return *a == *b;
-}
-
 int vjo_dict_find(const char *id)
 {
     for (int i = 0; i < VJO_DICT_COUNT; i++)
-        if (ieq(id, dicts[i].id))
+        if (vjo_ieq(id, dicts[i].id))
             return i;
     return -1;
 }
@@ -134,12 +199,54 @@ int vjo_dict_find(const char *id)
 /* VJO_DICT_* whose API key `key` sets, or -1. */
 static int api_key_dict(const char *key)
 {
-    if (ieq(key, "api_key")) /* the old name of jpdb_api_key (tools/migrate_config.py RENAMED) */
+    if (vjo_ieq(key, "api_key")) /* the old name of jpdb_api_key (tools/migrate_config.py RENAMED) */
         return VJO_DICT_JPDB;
     for (int i = 0; i < VJO_DICT_COUNT; i++)
-        if (ieq(key, dicts[i].key_setting))
+        if (vjo_ieq(key, dicts[i].key_setting))
             return i;
     return -1;
+}
+
+/* Plain string settings. Deck, note type, tags and field names may
+ * contain ';' and '#' (raw: no inline comment). */
+typedef struct {
+    const char *key;
+    size_t offset, size;
+    int required; /* an empty value keeps the default, with a warning */
+    int raw;
+} StrSetting;
+
+#define STR_SETTING(name, required, raw) \
+    {#name, offsetof(VjoConfig, name), sizeof(((VjoConfig *)0)->name), required, raw}
+static const StrSetting str_settings[] = {
+    STR_SETTING(log_host, 0, 0),
+    STR_SETTING(anki_host, 0, 0),
+    STR_SETTING(anki_deck, 1, 1),
+    STR_SETTING(anki_note_type, 1, 1),
+    STR_SETTING(anki_tags, 0, 1),
+};
+#define N_STR_SETTINGS ((int)(sizeof(str_settings) / sizeof(str_settings[0])))
+
+static const StrSetting *find_str_setting(const char *key)
+{
+    for (int i = 0; i < N_STR_SETTINGS; i++)
+        if (vjo_ieq(key, str_settings[i].key))
+            return &str_settings[i];
+    return NULL;
+}
+
+static int anki_field_index(const char *key)
+{
+    for (int i = 0; i < VJO_ANKI_FIELD_COUNT; i++)
+        if (vjo_ieq(key, anki_fields[i].key))
+            return i;
+    return -1;
+}
+
+static int keeps_comment_chars(const char *key)
+{
+    const StrSetting *ss = find_str_setting(key);
+    return (ss && ss->raw) || anki_field_index(key) >= 0;
 }
 
 static void set_str(VjoConfig *c, const char *key, const char *val, char *dst, size_t size)
@@ -161,8 +268,10 @@ static void set_font(VjoConfig *c, const char *key, const char *val, int *dst)
 
 static void set_kv(VjoConfig *c, const char *key, const char *val)
 {
-    int d;
-    if (ieq(key, "dictionary")) {
+    const StrSetting *ss;
+    char host[64];
+    int d, port;
+    if (vjo_ieq(key, "dictionary")) {
         d = vjo_dict_find(val);
         if (d >= 0)
             c->dictionary = d;
@@ -170,42 +279,52 @@ static void set_kv(VjoConfig *c, const char *key, const char *val)
             warn(c, "%s: invalid value '%s'", key, val);
     } else if ((d = api_key_dict(key)) >= 0) {
         set_str(c, key, val, c->api_key[d], sizeof(c->api_key[d]));
-    } else if (ieq(key, "frequency_filter") || ieq(key, "font_size") || ieq(key, "hw_jpeg")) {
+    } else if (vjo_ieq(key, "frequency_filter") || vjo_ieq(key, "font_size") || vjo_ieq(key, "hw_jpeg")) {
         /* removed settings (tools/migrate_config.py REMOVED): no warning */
-    } else if (ieq(key, "non_japanese_filter")) {
-        if (ieq(val, "lines"))
+    } else if (vjo_ieq(key, "non_japanese_filter")) {
+        if (vjo_ieq(val, "lines"))
             c->non_japanese_filter = VJO_FILTER_LINES;
-        else if (ieq(val, "none"))
+        else if (vjo_ieq(val, "none"))
             c->non_japanese_filter = VJO_FILTER_NONE;
         else
             warn(c, "%s: invalid value '%s'", key, val);
-    } else if (ieq(key, "font_size_ja")) {
+    } else if (vjo_ieq(key, "font_size_ja")) {
         set_font(c, key, val, &c->font_size_ja);
-    } else if (ieq(key, "font_size_en")) {
+    } else if (vjo_ieq(key, "font_size_en")) {
         set_font(c, key, val, &c->font_size_en);
-    } else if (ieq(key, "toggle_button")) {
+    } else if (vjo_ieq(key, "toggle_button")) {
         int found = 0;
         for (int i = 0; i < VJO_TRIGGER_COUNT; i++) {
-            if (ieq(val, trigger_names[i])) {
+            if (vjo_ieq(val, trigger_names[i])) {
                 c->toggle_button = i;
                 found = 1;
             }
         }
         if (!found)
             warn(c, "%s: invalid value '%s'", key, val);
-    } else if (ieq(key, "ocr_mode")) {
-        if (ieq(val, "auto"))
+    } else if (vjo_ieq(key, "ocr_mode")) {
+        if (vjo_ieq(val, "auto"))
             c->ocr_mode = VJO_OCR_AUTO;
-        else if (ieq(val, "on_press"))
+        else if (vjo_ieq(val, "on_press"))
             c->ocr_mode = VJO_OCR_ON_PRESS;
         else
             warn(c, "%s: invalid value '%s'", key, val);
-    } else if (ieq(key, "log_host")) {
-        set_str(c, key, val, c->log_host, sizeof(c->log_host));
-    } else if (ieq(key, "log_file")) {
-        if (ieq(val, "on"))
+    } else if ((ss = find_str_setting(key)) != NULL) {
+        char *dst = (char *)c + ss->offset;
+        if (!*val && ss->required)
+            warn(c, "%s: empty (keeping %s)", key, dst);
+        else
+            set_str(c, key, val, dst, ss->size);
+        if (dst == c->anki_host && vjo_anki_endpoint(c->anki_host, host, sizeof(host), &port) < 0) {
+            warn(c, "%s: invalid value '%s' (empty, auto, or IP[:port])", key, val);
+            c->anki_host[0] = '\0';
+        }
+    } else if ((d = anki_field_index(key)) >= 0) {
+        set_str(c, key, val, c->anki_field[d], sizeof(c->anki_field[d]));
+    } else if (vjo_ieq(key, "log_file")) {
+        if (vjo_ieq(val, "on"))
             c->log_file = 1;
-        else if (ieq(val, "off"))
+        else if (vjo_ieq(val, "off"))
             c->log_file = 0;
         else
             warn(c, "%s: invalid value '%s'", key, val);
@@ -237,14 +356,6 @@ void vjo_config_parse(VjoConfig *c, const char *text, size_t len)
             s++;
         if (s == n || line[s] == ';' || line[s] == '#')
             continue;
-        /* Inline comment: ';' or '#' preceded by whitespace. */
-        for (e = s + 1; e < n; e++) {
-            if ((line[e] == ';' || line[e] == '#') && is_space(line[e - 1])) {
-                n = e;
-                break;
-            }
-        }
-        line[n] = '\0';
         {
             char *p = strchr(line + s, '=');
             if (!p) {
@@ -261,6 +372,15 @@ void vjo_config_parse(VjoConfig *c, const char *text, size_t len)
         memcpy(key, line + s, e - s);
         key[e - s] = '\0';
 
+        /* Inline comment in the value: ';' or '#' preceded by whitespace. */
+        if (!keeps_comment_chars(key)) {
+            for (e = eq + 1; e < n; e++) {
+                if ((line[e] == ';' || line[e] == '#') && is_space(line[e - 1])) {
+                    n = e;
+                    break;
+                }
+            }
+        }
         s = eq + 1;
         while (s < n && is_space(line[s]))
             s++;

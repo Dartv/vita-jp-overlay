@@ -63,7 +63,7 @@ void operator delete(void *p, unsigned int)
 #define STICK_SCROLL_PX 0.12f /* per frame per unit of stick deflection */
 #define LAYOUT_RETRY_FRAMES 6 /* layout may land a frame or two after SetString */
 #define CLEAR_HOLD_US 1000000
-#define MAX_RANGES 512 /* entries whose header highlight range is cached */
+#define MAX_RANGES VJO_MAX_ENTRIES /* entries whose header highlight range is cached */
 
 enum { MODE_OVERLAY = 0, MODE_REGION = 1 };
 
@@ -84,7 +84,9 @@ static ui::Widget *s_separator, *s_band_mid;
 static ui::RichText *s_hint, *s_region_hint;
 static ui::Widget *s_panel, *s_region_layer, *s_region_rect;
 
-static unsigned s_seen_version;
+static unsigned s_seen_version, s_seen_anki_version;
+static unsigned s_list_seq; /* the shown list (Anki requests name it) */
+static int s_anki_enabled;
 static int s_selected;
 /* Copied from the view under its lock, so nothing outside render() reads
  * the result memory (the control thread frees it when a game exits) and no
@@ -283,6 +285,8 @@ static void render(int new_content)
     vjo_view_lock();
     l = g_view.list;
     s_n_entries = l ? l->n_entries : 0;
+    s_list_seq = g_view.list_seq;
+    s_anki_enabled = g_view.anki_enabled;
     if (s_selected >= s_n_entries)
         s_selected = s_n_entries ? s_n_entries - 1 : 0;
     vjo_arena_reset(&s_ui);
@@ -302,10 +306,22 @@ static void render(int new_content)
         have_body = 1;
         if (g_view.status[0])
             vjo_styled_puts(&body, g_view.status, g_view.status_is_error ? VJO_RGB_ERROR : VJO_RGB_DIM, en);
-        if (s_n_entries) {
+        if (g_view.anki_status[0]) {
+            /* by VJO_ANKI_STATUS_* */
+            static const uint32_t rgb[] = {VJO_RGB_DIM, VJO_RGB_ERROR};
+            int k = g_view.anki_status_kind;
+            if (k < 0 || k >= (int)(sizeof(rgb) / sizeof(rgb[0])))
+                k = VJO_ANKI_STATUS_DIM;
             if (body.len)
                 vjo_styled_puts(&body, "\n", VJO_RGB_DIM, en);
-            vjo_styled_entry(&body, l, s_selected, ja, en);
+            vjo_styled_puts(&body, g_view.anki_status, rgb[k], en);
+        }
+        if (s_n_entries) {
+            int marked = g_view.anki_marks_seq == s_list_seq && s_selected < VJO_MAX_ENTRIES &&
+                         g_view.anki_mark[s_selected];
+            if (body.len)
+                vjo_styled_puts(&body, "\n", VJO_RGB_DIM, en);
+            vjo_styled_entry(&body, l, s_selected, ja, en, marked);
         } else if (l && !g_view.status[0]) {
             vjo_styled_puts(&body, "No dictionary entries for this text.", VJO_RGB_DIM, en);
         }
@@ -467,7 +483,17 @@ static void open_page(void)
             texts[i]->SetLayoutAttribute(graph::TextLayoutAttribute_Kinsoku, true);
         }
     }
-    set_rich(s_hint, "<font color=\"#8a94a6\">◀ ▶ ▲ ▼ word · stick scroll · □ region · ○ close</font>");
+    {
+        char hint[160];
+        int anki;
+        vjo_view_lock();
+        anki = g_view.anki_enabled;
+        vjo_view_unlock();
+        sceClibSnprintf(hint, sizeof(hint),
+                        "<font color=\"#8a94a6\">◀ ▶ ▲ ▼ word · %sstick scroll · □ region · ○ close</font>",
+                        anki ? "× Anki · " : "");
+        set_rich(s_hint, hint);
+    }
     s_mode = MODE_OVERLAY;
     s_selected = 0;
     s_hl_len = 0;
@@ -555,6 +581,8 @@ static void input_overlay(const VjoInput *in, uint32_t pressed)
         s_stick_max = dy < 0 ? -dy : dy;
     if (dy <= -STICK_DEADZONE || dy >= STICK_DEADZONE)
         pane_scroll_to(&s_body, s_body.scroll + (float)dy * STICK_SCROLL_PX);
+    if ((pressed & SCE_CTRL_CROSS) && s_anki_enabled && s_selected < n)
+        vjo_anki_post_add(s_list_seq, s_selected);
     if (pressed & SCE_CTRL_CIRCLE)
         vjo_post_command(VJO_CMD_CLOSED, NULL);
     if (pressed & SCE_CTRL_SQUARE)
@@ -631,12 +659,12 @@ static void input_region(uint32_t held, uint32_t pressed)
         leave_region_mode();
 }
 
-static void frame_body(unsigned version);
+static void frame_body(unsigned version, unsigned anki_version);
 
 static void frame(void *arg)
 {
     int want_open;
-    unsigned version;
+    unsigned version, anki_version;
     (void)arg;
 
     /* Runs on SceShell's paf main thread every frame: while closed, skip the
@@ -647,11 +675,13 @@ static void frame(void *arg)
     vjo_view_lock();
     want_open = g_view.open;
     version = g_view.version;
+    anki_version = g_view.anki_version;
     vjo_view_unlock();
 
     if (want_open && !s_page) {
         open_page();
         s_seen_version = version - 1;
+        s_seen_anki_version = anki_version;
     } else if (!want_open && s_page) {
         close_page();
         return;
@@ -660,7 +690,7 @@ static void frame(void *arg)
         return;
     {
         int64_t t0 = sceKernelGetProcessTimeWide();
-        frame_body(version);
+        frame_body(version, anki_version);
         t0 = sceKernelGetProcessTimeWide() - t0;
         if (t0 > s_frame_max_us)
             s_frame_max_us = t0;
@@ -669,11 +699,19 @@ static void frame(void *arg)
 }
 
 /* One frame with the overlay page open. */
-static void frame_body(unsigned version)
+static void frame_body(unsigned version, unsigned anki_version)
 {
     if (version != s_seen_version) {
         s_seen_version = version;
+        s_seen_anki_version = anki_version;
         render(1);
+    } else if (anki_version != s_seen_anki_version) {
+        /* Anki status or marks: the body only, keeping the selection and
+         * the definition's scroll */
+        float scroll = s_body.scroll;
+        s_seen_anki_version = anki_version;
+        render(0);
+        s_body.scroll = scroll;
     }
     if (s_follow_frames > 0 && (header_follow() || --s_follow_frames == 0))
         s_follow_frames = 0;

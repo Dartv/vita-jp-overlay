@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "port.h"
+#include "utf.h"
 
 int vjo_conn_send_all(VjoConn *c, const void *p, size_t n)
 {
@@ -94,18 +95,6 @@ static int rd_line(Rd *r, char *out, size_t cap)
     return (int)n;
 }
 
-static int ieq_prefix(const char *s, const char *prefix)
-{
-    for (; *prefix; s++, prefix++) {
-        char a = *s, b = *prefix;
-        if (a >= 'A' && a <= 'Z')
-            a = (char)(a + 32);
-        if (a != b)
-            return 0;
-    }
-    return 1;
-}
-
 static const char *hval(const char *line, size_t name_len)
 {
     const char *v = line + name_len;
@@ -166,7 +155,7 @@ int vjo_http_recv(VjoArena *a, VjoConn *c, size_t max_body, VjoHttpResponse *res
     if (rd_line(r, line, sizeof(line)) < 0)
         return r->err ? r->err : VJO_E_HTTP;
     /* "HTTP/1.x NNN ..." */
-    if (!ieq_prefix(line, "http/1.") || strlen(line) < 12 || line[8] != ' ')
+    if (!vjo_ieq_prefix(line, "http/1.") || strlen(line) < 12 || line[8] != ' ')
         return VJO_E_HTTP;
     for (int k = 9; k < 12; k++) {
         if (line[k] < '0' || line[k] > '9')
@@ -180,7 +169,7 @@ int vjo_http_recv(VjoArena *a, VjoConn *c, size_t max_body, VjoHttpResponse *res
             return r->err ? r->err : VJO_E_HTTP;
         if (n == 0)
             break;
-        if (ieq_prefix(line, "content-length:")) {
+        if (vjo_ieq_prefix(line, "content-length:")) {
             const char *v = hval(line, 15);
             if (*v < '0' || *v > '9')
                 return VJO_E_HTTP;
@@ -189,11 +178,11 @@ int vjo_http_recv(VjoArena *a, VjoConn *c, size_t max_body, VjoHttpResponse *res
                 if (content_length <= max_body)
                     content_length = content_length * 10 + (size_t)(*v - '0');
             have_length = 1;
-        } else if (ieq_prefix(line, "transfer-encoding:")) {
-            if (ieq_prefix(hval(line, 18), "chunked"))
+        } else if (vjo_ieq_prefix(line, "transfer-encoding:")) {
+            if (vjo_ieq_prefix(hval(line, 18), "chunked"))
                 chunked = 1;
-        } else if (ieq_prefix(line, "content-encoding:")) {
-            if (ieq_prefix(hval(line, 17), "gzip"))
+        } else if (vjo_ieq_prefix(line, "content-encoding:")) {
+            if (vjo_ieq_prefix(hval(line, 17), "gzip"))
                 resp->gzip = 1;
         }
     }

@@ -17,6 +17,7 @@ typedef struct {
     /* Writes exactly body_len bytes to c; returns 0 or a VJO_E_* code. */
     int (*write_body)(void *ud, VjoConn *c);
     void *ud;
+    int connect_timeout_us;    /* 0 = the platform's default */
 } VjoHttpRequest;
 
 typedef struct {

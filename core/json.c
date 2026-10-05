@@ -88,6 +88,23 @@ int vjo_json_is_null(const VjoJson *j, int i)
            (j->t[i].type == JSMN_PRIMITIVE && j->js[j->t[i].start] == 'n');
 }
 
+int vjo_json_bool(const VjoJson *j, int i, int *out)
+{
+    const char *s;
+    int n;
+    if (!vjo_json_is_type(j, i, JSMN_PRIMITIVE))
+        return -1;
+    s = j->js + j->t[i].start;
+    n = j->t[i].end - j->t[i].start;
+    if (n == 4 && !memcmp(s, "true", 4))
+        *out = 1;
+    else if (n == 5 && !memcmp(s, "false", 5))
+        *out = 0;
+    else
+        return -1;
+    return 0;
+}
+
 int vjo_json_int(const VjoJson *j, int i, long *out)
 {
     const char *s;
@@ -210,9 +227,14 @@ int vjo_json_append_str(VjoBuf *b, const VjoJson *j, int i)
 
 int vjo_json_write_string(VjoBuf *b, const char *s)
 {
+    return vjo_json_write_stringn(b, s, strlen(s));
+}
+
+int vjo_json_write_stringn(VjoBuf *b, const char *s, size_t n)
+{
     static const char hexd[] = "0123456789abcdef";
     vjo_buf_putc(b, '"');
-    for (; *s; s++) {
+    for (const char *end = s + n; s < end; s++) {
         unsigned char c = (unsigned char)*s;
         switch (c) {
         case '"': vjo_buf_puts(b, "\\\""); break;

@@ -17,7 +17,8 @@ target_compile_options(bearssl PRIVATE -w)
 set(CORE_SRC
   core/arena.c core/pb.c core/utf.c core/lens.c core/json.c core/jpdb.c
   core/textfilter.c core/entries.c core/jiten.c core/config.c core/regions.c
-  core/http.c core/tls.c core/tls_roots.c core/client.c core/styled.c core/jpegsw.c)
+  core/http.c core/tls.c core/tls_roots.c core/client.c core/styled.c core/jpegsw.c
+  core/base64.c core/anki.c core/net.c)
 add_library(vjo_core STATIC ${CORE_SRC})
 target_include_directories(vjo_core PUBLIC core include)
 target_link_libraries(vjo_core PUBLIC bearssl)
@@ -43,3 +44,7 @@ target_include_directories(vjo-tests PRIVATE third_party/acutest/include kernel)
 target_link_libraries(vjo-tests vjo_host)
 target_compile_definitions(vjo-tests PRIVATE VJO_FIXTURES="${CMAKE_SOURCE_DIR}/host/fixtures")
 add_test(NAME core COMMAND vjo-tests)
+add_executable(vjo-anki-tests host/tests/test_anki.c)
+target_include_directories(vjo-anki-tests PRIVATE third_party/acutest/include)
+target_link_libraries(vjo-anki-tests vjo_host)
+add_test(NAME anki COMMAND vjo-anki-tests)

@@ -348,7 +348,7 @@ int vjoPollInput(VjoInput *out)
 
 /* Returns the capture sequence number (> 0); VjoState.done_seq reaches it
  * when this capture has finished. */
-int vjoRequestCapture(void)
+int vjoRequestCapture(uint32_t flags)
 {
     uint32_t state;
     int ret;
@@ -368,6 +368,7 @@ int vjoRequestCapture(void)
             g.capture_seq = 1;
         ret = (int)g.capture_seq;
         g.raw_valid = 0;
+        g.capture_full = (flags & VJO_CAPTURE_FULL) != 0;
         g.capture_requested_us = ksceKernelGetSystemTimeWide();
         g.capture_state = CAPTURE_PENDING;
     }

@@ -96,7 +96,7 @@ int vjo_entry_header_range(const VjoEntryList *l, int entry, uint32_t *start, ui
     return *len > 0;
 }
 
-void vjo_styled_entry(VjoStyled *s, const VjoEntryList *l, int selected, int ja_px, int en_px)
+void vjo_styled_entry(VjoStyled *s, const VjoEntryList *l, int selected, int ja_px, int en_px, int in_anki)
 {
     const VjoVocab *v;
     char rank[16];
@@ -111,6 +111,8 @@ void vjo_styled_entry(VjoStyled *s, const VjoEntryList *l, int selected, int ja_
     }
     vjo_snprintf(rank, sizeof(rank), " %d", v->rank);
     vjo_styled_puts(s, rank, VJO_RGB_RANK, en_px);
+    if (in_anki)
+        vjo_styled_puts(s, " " VJO_ANKI_MARK, VJO_RGB_OK, en_px);
     for (int i = 0; i < v->n_meanings; i++) {
         vjo_styled_puts(s, "\n", VJO_RGB_DIM, en_px);
         vjo_styled_puts(s, v->meanings[i], VJO_RGB_DIM, en_px);

@@ -8,28 +8,11 @@
 
 #include "arena.h"
 #include "config.h"
-#include "conn.h"
 #include "entries.h"
 #include "dict.h"
 #include "lens.h"
+#include "net.h"
 
-typedef struct {
-    void *ud;
-    /* Opens a TCP connection; returns VJO_OK or VJO_E_NET. */
-    int (*connect)(void *ud, const char *host, int port, VjoConn *out);
-    void (*disconnect)(void *ud, VjoConn *c);
-    void (*random)(void *ud, void *buf, size_t n);
-    uint64_t (*unix_time)(void *ud);
-    void (*log)(void *ud, const char *msg); /* optional */
-    /* optional: raw response bodies (host CLI --record) */
-    void (*on_response)(void *ud, const char *host, const char *body, size_t len);
-#ifdef VJO_HOST
-    /* Plain HTTP over connect()'s stream instead of TLS (host replay of
-     * recorded responses); random/unix_time are then unused. Host-only:
-     * the Vita build has no way to skip TLS. */
-    int plain_http;
-#endif
-} VjoPlatform;
 
 typedef struct {
     void *ud;
@@ -39,13 +22,6 @@ typedef struct {
     uint32_t width, height;
 } VjoJpegSource;
 
-typedef struct {
-    int rc;               /* VJO_OK or VJO_E_* */
-    int http_status;      /* when rc == VJO_E_STATUS */
-    int tls_error;        /* BearSSL error code when rc == VJO_E_TLS */
-    const char *detail;   /* server-provided message, may be NULL */
-    int dict;             /* VJO_DICT_* for VJO_STAGE_DICT errors */
-} VjoErr;
 
 /* Stages for VjoOverlayData.failed_stage */
 enum { VJO_STAGE_NONE = 0, VJO_STAGE_OCR = 1, VJO_STAGE_DICT = 2 }; /* OCR, then dictionary */

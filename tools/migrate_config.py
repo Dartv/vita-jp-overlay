@@ -23,8 +23,10 @@ def parse(text):
         if not line or line[0] in ";#" or "=" not in line:
             continue
         k, v = line.split("=", 1)
-        v = re.split(r"\s[;#]", v, maxsplit=1)[0]  # inline comment, as in core/config.c
-        vals[k.strip().lower()] = v.strip()
+        k = k.strip().lower()
+        if not k.startswith("anki_"):  # anki_ values may contain ; and #, as in core/config.c
+            v = re.split(r"\s[;#]", v, maxsplit=1)[0]  # inline comment
+        vals[k] = v.strip()
     return vals
 
 

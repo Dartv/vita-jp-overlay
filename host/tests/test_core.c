@@ -723,12 +723,17 @@ static void test_styled(void)
 
     /* body: headword+reading at ja px, rank+meanings at en px */
     TEST_ASSERT(vjo_styled_init(&st, &A, 256, 16) == 0);
-    vjo_styled_entry(&st, &l, 0, 21, 18);
+    vjo_styled_entry(&st, &l, 0, 21, 18, 0);
     TEST_CHECK(st.n_spans == 9); /* 猫 ( ねこ ) rank \n meaning \n meaning */
     TEST_CHECK(st.spans[0].len == 1 && st.spans[0].px == 21 && st.spans[0].rgb == VJO_RGB_HIGHLIGHT);
     TEST_CHECK(st.spans[2].rgb == VJO_RGB_READING && st.spans[2].px == 21);
     TEST_CHECK(st.spans[4].px == 18 && st.spans[4].rgb == VJO_RGB_RANK); /* " 1500" */
     TEST_CHECK(st.spans[6].px == 18 && st.spans[6].len == 9);           /* "cat <pet>" unescaped */
+    /* in Anki: a green √ after the rank */
+    TEST_ASSERT(vjo_styled_init(&st, &A, 256, 16) == 0);
+    vjo_styled_entry(&st, &l, 0, 21, 18, 1);
+    TEST_CHECK(st.n_spans == 10 && st.spans[5].rgb == VJO_RGB_OK && st.spans[5].len == 2 &&
+               st.text[st.spans[5].start + 1] == 0x221A);
 
     /* surrogate pairs and truncation */
     TEST_ASSERT(vjo_styled_init(&st, &A, 3, 4) == 0);

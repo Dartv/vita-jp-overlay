@@ -2,6 +2,7 @@
 #include <psp2/io/fcntl.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/clib.h>
+#include <string.h>
 
 #include "../core/regions.h"
 #include "shell.h"
@@ -72,7 +73,7 @@ void vjo_config_load(VjoConfig *cfg, VjoArena *scratch)
     } else if (!file_exists(VJO_CONFIG_PATH)) {
         /* First run only: never overwrite a file we merely failed to read. */
         const char *def = vjo_config_default_text();
-        vjo_file_write(VJO_CONFIG_PATH, def, sceClibStrnlen(def, 4096));
+        vjo_file_write(VJO_CONFIG_PATH, def, strlen(def));
     }
     vjo_arena_release(scratch, mark);
 }
