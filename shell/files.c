@@ -79,23 +79,28 @@ void vjo_config_load(VjoConfig *cfg, VjoArena *scratch)
 }
 
 /* region.ini: see core/regions.h. */
-int vjo_region_load(VjoRect *out, VjoArena *scratch)
+int vjo_region_load(const char *title_id, VjoRect *out, VjoArena *scratch)
 {
     size_t mark = vjo_arena_mark(scratch), len = 0;
     char *text = vjo_file_read(scratch, VJO_REGION_PATH, &len);
-    int found = text ? vjo_region_parse(text, len, out) : 0;
+    int found = text ? vjo_region_parse(text, len, title_id, out) : VJO_REGION_NONE;
     vjo_arena_release(scratch, mark);
     return found;
 }
 
-int vjo_region_save(const VjoRect *r)
+int vjo_region_save(const char *title_id, const VjoRect *r, VjoArena *scratch)
 {
-    char line[64];
-    int n;
-    if (!r) {
-        sceIoRemove(VJO_REGION_PATH);
-        return 0;
+    static const VjoRect full = {0, 0, 0, 0};
+    size_t mark = vjo_arena_mark(scratch), len = 0;
+    char *text = vjo_file_read(scratch, VJO_REGION_PATH, &len), *next;
+    int rc = -1;
+    /* never rewrite a file that exists but could not be read: it holds the
+     * other games' regions */
+    if (text || !file_exists(VJO_REGION_PATH)) {
+        next = vjo_region_update(scratch, text ? text : "", text ? len : 0, title_id, r ? r : &full);
+        if (next)
+            rc = vjo_file_write(VJO_REGION_PATH, next, strlen(next));
     }
-    n = vjo_region_format(line, sizeof(line), r);
-    return n < 0 ? n : vjo_file_write(VJO_REGION_PATH, line, (size_t)n);
+    vjo_arena_release(scratch, mark);
+    return rc;
 }

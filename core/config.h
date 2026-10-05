@@ -31,6 +31,7 @@ typedef struct {
     int font_size_ja;         /* 8..40: header, headwords, readings */
     int font_size_en;         /* 8..40: meanings, rank, messages */
     int toggle_button;        /* enum VjoTrigger */
+    int subtitle_button;      /* enum VjoTrigger, != toggle_button */
     int ocr_mode;             /* VJO_OCR_* */
     char log_host[64];        /* "" = UDP log off */
     int log_file;             /* 0/1 */

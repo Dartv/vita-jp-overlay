@@ -13,7 +13,7 @@ import re
 import sys
 
 RENAMED = {"api_key": "jpdb_api_key"}
-REMOVED = {"frequency_filter", "font_size", "hw_jpeg"}
+REMOVED = {"frequency_filter", "font_size", "hw_jpeg", "combo_delay_ms"}
 
 
 def parse(text):

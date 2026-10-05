@@ -60,10 +60,24 @@ static int is_single_button(int trigger)
 
 /* ---- trigger events ---- */
 
-static void fire_trigger(uint32_t mask)
+static const uint32_t trig_events[TRIG_COUNT] = {
+    [TRIG_TOGGLE] = VJO_EV_TRIGGER,
+    [TRIG_SUBTITLE] = VJO_EV_SUBTITLE,
+};
+
+static void fire_trigger(int k, uint32_t mask)
 {
     __sync_fetch_and_or(&g.suppress_mask, mask);
-    ksceKernelSetEventFlag(g.evf, VJO_EV_TRIGGER);
+    ksceKernelSetEventFlag(g.evf, trig_events[k]);
+}
+
+/* The trigger set to the rear double tap, or -1. */
+static int rear_trigger(void)
+{
+    for (int k = 0; k < TRIG_COUNT; k++)
+        if (g.trigger[k] == VJO_TRIGGER_REAR_DOUBLE_TAP)
+            return k;
+    return -1;
 }
 
 /* Rear double tap. The back panel is read in the game's context, from its
@@ -100,8 +114,10 @@ static void rear_double_tap(const KTouchData *t, int64_t now)
             rear_taps = 0; /* end of a drag */
         } else if (now - rear_down_t < TAP_MAX_US) {
             if (rear_taps == 1 && now - rear_up_t < TAP_GAP_US + TAP_MAX_US) {
+                int k = rear_trigger();
                 rear_taps = 0;
-                fire_trigger(0);
+                if (k >= 0)
+                    fire_trigger(k, 0);
             } else {
                 rear_taps = 1;
                 rear_up_t = now;
@@ -124,7 +140,7 @@ static void rear_sample(void)
     KTouchData t;
     int64_t now;
     int n;
-    if (g.trigger != VJO_TRIGGER_REAR_DOUBLE_TAP || g.game_pid <= 0 || !g.game_active ||
+    if (rear_trigger() < 0 || g.game_pid <= 0 || !g.game_active ||
         ksceKernelGetProcessId() != g.game_pid)
         return;
     if (!__sync_bool_compare_and_swap(&rear_busy, 0, 1))
@@ -144,15 +160,46 @@ static void rear_sample(void)
     __sync_lock_release(&rear_busy);
 }
 
-/* Rewrites the game's pad data (user memory) in place. */
-static void filter_ctrl(SceCtrlData *pad_data, int n, int negative)
+/* Combo delay state (triggers.h), per pad port: a game may also read empty
+ * ports, which must not end a press. Pad calls can come from several game
+ * threads: one at a time uses it, the others skip the delay. Reset when the
+ * triggers change (g.trigger_gen). */
+#define COMBO_DELAY_US 300000 /* covers the gap between a combo's two presses */
+#define HOLD_PORTS 5          /* 0 = the Vita's pad, 1-4 = PS TV controllers */
+
+static TrigHold hold[HOLD_PORTS][TRIG_COUNT];
+static volatile int hold_busy;
+static uint32_t hold_gen;
+
+static void trig_config(TrigConfig *c)
 {
-    uint32_t mask, hide;
+    for (int k = 0; k < TRIG_COUNT; k++) {
+        c->mask[k] = trigger_mask(g.trigger[k]);
+        c->single[k] = is_single_button(g.trigger[k]);
+    }
+    c->delay_us = COMBO_DELAY_US;
+}
+
+/* Rewrites the game's pad data (user memory) in place. */
+static void filter_ctrl(int port, SceCtrlData *pad_data, int n, int negative)
+{
+    TrigConfig c;
+    TrigHold *holds = NULL;
+    int64_t now;
     if (n <= 0 || g.game_pid <= 0 || !g.game_active || ksceKernelGetProcessId() != g.game_pid)
         return;
     if (n > 64)
         n = 64;
-    mask = trigger_mask(g.trigger);
+    /* One time for the call's samples: games read one at a time. */
+    now = ksceKernelGetSystemTimeWide();
+    trig_config(&c);
+    if (c.delay_us && port >= 0 && port < HOLD_PORTS && __sync_bool_compare_and_swap(&hold_busy, 0, 1)) {
+        if (hold_gen != g.trigger_gen) {
+            memset(hold, 0, sizeof(hold));
+            hold_gen = g.trigger_gen;
+        }
+        holds = hold[port];
+    }
     for (int i = 0; i < n; i++) {
         struct {
             uint32_t buttons;
@@ -161,22 +208,19 @@ static void filter_ctrl(SceCtrlData *pad_data, int n, int negative)
         uint32_t pos;
         uintptr_t u = (uintptr_t)&pad_data[i].buttons;
         if (ksceKernelMemcpyUserToKernel(&d, (const void *)u, sizeof(d)) < 0)
-            return;
+            break;
         pos = negative ? ~d.buttons : d.buttons;
         if (g.input_block) {
             pos = 0;
             d.lx = d.ly = d.rx = d.ry = 0x80;
         } else {
-            hide = g.suppress_mask;
-            if (is_single_button(g.trigger))
-                hide |= mask;
-            else if (mask && (pos & mask) == mask)
-                hide |= mask;
-            pos &= ~hide;
+            pos = trig_filter(&c, holds, pos, now) & ~g.suppress_mask;
         }
         d.buttons = negative ? ~pos : pos;
         ksceKernelMemcpyKernelToUser((void *)u, &d, sizeof(d));
     }
+    if (holds)
+        __sync_lock_release(&hold_busy);
 }
 
 #define CTRL_HOOK(idx, name, negative)                                       \
@@ -185,7 +229,7 @@ static void filter_ctrl(SceCtrlData *pad_data, int n, int negative)
         int ret = TAI_CONTINUE(int, refs[idx], port, pad_data, count);       \
         rear_sample();                                                       \
         if (ret > 0)                                                         \
-            filter_ctrl(pad_data, ret, negative);                            \
+            filter_ctrl(port, pad_data, ret, negative);                            \
         return ret;                                                          \
     }
 
@@ -305,14 +349,13 @@ void input_hooks_release(void)
 
 /* ---- pad polling (worker thread, ~60 Hz) ---- */
 
-static int prev_pressed, analog_on;
+static TrigEdge edges[TRIG_COUNT];
+static int analog_on;
 
 void input_poll(void)
 {
     SceCtrlData c;
     VjoInput in;
-    uint32_t mask = trigger_mask(g.trigger);
-    int pressed;
 
     /* The sampling mode is per process and starts digital, which reports
      * centred sticks; this thread's reads need analog (as reVita's setup
@@ -338,13 +381,11 @@ void input_poll(void)
     /* Held-over buttons stay hidden from the game until released. */
     __sync_fetch_and_and(&g.suppress_mask, g.raw_buttons);
 
-    if (g.trigger != VJO_TRIGGER_REAR_DOUBLE_TAP) {
-        pressed = mask && (g.raw_buttons & mask) == mask;
-        if (pressed && !prev_pressed) {
-            if (g.game_pid > 0 && g.game_active)
-                fire_trigger(mask);
-        }
-        prev_pressed = pressed;
+    for (int k = 0; k < TRIG_COUNT; k++) {
+        uint32_t mask = trigger_mask(g.trigger[k]);
+        if (trig_edge(&edges[k], mask, trigger_mask(g.trigger[trig_other(k)]), g.raw_buttons) &&
+            g.game_pid > 0 && g.game_active)
+            fire_trigger(k, mask);
     }
 
     g.last_input = in;

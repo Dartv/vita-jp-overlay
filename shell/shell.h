@@ -16,7 +16,7 @@ extern "C" {
 
 #define VJO_DATA_DIR    "ux0:data/VitaJPOverlay"
 #define VJO_CONFIG_PATH VJO_DATA_DIR "/config.ini"
-#define VJO_REGION_PATH VJO_DATA_DIR "/region.ini" /* one region for all games */
+#define VJO_REGION_PATH VJO_DATA_DIR "/region.ini" /* per game, see core/regions.h */
 #define VJO_LOG_PATH    VJO_DATA_DIR "/log.txt"
 #define VJO_LOG_OLD_PATH VJO_DATA_DIR "/log.old.txt"
 #define VJO_STATUS_PATH VJO_DATA_DIR "/status.txt"
@@ -26,6 +26,9 @@ extern "C" {
 #define VJO_MAX_ENTRIES 512 /* entries the overlay navigates (and Anki marks) */
 
 enum { VJO_ANKI_STATUS_DIM = 0, VJO_ANKI_STATUS_ERROR = 1 };
+/* VjoView.strip_kind */
+enum { VJO_STRIP_SENTENCE = 0, VJO_STRIP_STATUS = 1, VJO_STRIP_ERROR = 2 };
+#define VJO_STRIP_MAX 4096 /* bytes of UTF-8 */
 
 /* ---- view model read by the overlay (under vjo_view_lock) ---- */
 typedef struct {
@@ -47,6 +50,13 @@ typedef struct {
     int anki_status_kind;     /* VJO_ANKI_STATUS_* */
     unsigned anki_marks_seq;  /* list_seq the marks are for */
     uint8_t anki_mark[VJO_MAX_ENTRIES]; /* 1 = already in Anki */
+    /* subtitles: a strip at the top while the overlay is closed; changes
+     * bump strip_version */
+    int strip_on;             /* subtitles are on (stored atomically) */
+    unsigned strip_version;
+    char strip_text[VJO_STRIP_MAX]; /* "" = no strip drawn */
+    int strip_kind;           /* VJO_STRIP_* */
+    int strip_busy;           /* a recognition is running */
 } VjoView;
 
 extern VjoView g_view;
@@ -104,8 +114,11 @@ void vjo_status_close(void);
 char *vjo_file_read(VjoArena *a, const char *path, size_t *len);
 int vjo_file_write(const char *path, const void *data, size_t len);
 void vjo_config_load(VjoConfig *cfg, VjoArena *scratch);
-int vjo_region_load(VjoRect *out, VjoArena *scratch);
-int vjo_region_save(const VjoRect *r); /* NULL = full screen */
+/* title_id's region (VJO_REGION_* from core/regions.h). */
+int vjo_region_load(const char *title_id, VjoRect *out, VjoArena *scratch);
+/* Saves title_id's region; NULL = the full screen. Other games' lines are
+ * kept. */
+int vjo_region_save(const char *title_id, const VjoRect *r, VjoArena *scratch);
 
 #ifdef __cplusplus
 }

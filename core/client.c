@@ -7,6 +7,7 @@
 #include "jpdb.h"
 #include "port.h"
 #include "textfilter.h"
+#include "utf.h"
 
 typedef struct {
     const VjoLensRequest *lr;
@@ -153,21 +154,32 @@ static int is_blank(const char *s)
     return 1;
 }
 
-int vjo_overlay_from_text(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg,
-                          const char *ocr_text, VjoOverlayData *out)
+/* Sets ocr_text, filtered and sentence (part of the OCR stage). */
+static int filter_text(VjoArena *a, const VjoConfig *cfg, const char *ocr_text, VjoOverlayData *out)
 {
-    VjoDictResult jr;
-    char *filtered, *stripped;
-
+    char *copy;
     out->ocr_text = ocr_text;
-    filtered = vjo_filter_lines(a, ocr_text, cfg->non_japanese_filter);
-    if (!filtered) {
-        out->failed_stage = VJO_STAGE_DICT;
+    out->filtered = vjo_filter_lines(a, ocr_text, cfg->non_japanese_filter);
+    copy = out->filtered ? vjo_arena_strndup(a, out->filtered, strlen(out->filtered)) : NULL;
+    if (!copy) {
+        out->failed_stage = VJO_STAGE_OCR;
         return out->err.rc = VJO_E_OOM;
     }
-    out->filtered = filtered;
+    out->sentence = vjo_java_trim(copy); /* as vjo_entries_build trims the header */
+    return VJO_OK;
+}
+
+int vjo_overlay_lookup(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg, VjoOverlayData *out)
+{
+    VjoDictResult jr;
+    char *stripped;
+
+    if (!out->filtered) { /* no successful vjo_overlay_ocr */
+        out->failed_stage = VJO_STAGE_DICT;
+        return out->err.rc = out->err.rc ? out->err.rc : VJO_E_PARSE;
+    }
     memset(&jr, 0, sizeof(jr));
-    stripped = vjo_strip_newlines(a, filtered);
+    stripped = vjo_strip_newlines(a, out->filtered);
     if (!stripped) {
         out->failed_stage = VJO_STAGE_DICT;
         return out->err.rc = VJO_E_OOM;
@@ -179,25 +191,41 @@ int vjo_overlay_from_text(VjoArena *a, const VjoPlatform *p, const VjoConfig *cf
             memset(&jr, 0, sizeof(jr));
         }
     }
-    if (vjo_entries_build(a, filtered, &jr, &out->list) < 0) {
+    if (vjo_entries_build(a, out->filtered, &jr, &out->list) < 0) {
         out->failed_stage = VJO_STAGE_DICT;
         return out->err.rc = VJO_E_OOM;
     }
     return out->err.rc;
 }
 
-int vjo_overlay_from_jpeg(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg,
-                          const VjoJpegSource *src, VjoOverlayData *out)
+int vjo_overlay_from_text(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg,
+                          const char *ocr_text, VjoOverlayData *out)
+{
+    if (filter_text(a, cfg, ocr_text, out))
+        return out->err.rc;
+    return vjo_overlay_lookup(a, p, cfg, out);
+}
+
+int vjo_overlay_ocr(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg,
+                    const VjoJpegSource *src, VjoOverlayData *out)
 {
     VjoLensResult lr;
     const char *text = NULL;
     memset(out, 0, sizeof(*out));
+    out->list.header = "";
     if (vjo_lens_ocr(a, p, src, &lr, &text, &out->err)) {
         out->failed_stage = VJO_STAGE_OCR;
-        out->list.header = "";
         return out->err.rc;
     }
-    return vjo_overlay_from_text(a, p, cfg, text, out);
+    return filter_text(a, cfg, text, out);
+}
+
+int vjo_overlay_from_jpeg(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg,
+                          const VjoJpegSource *src, VjoOverlayData *out)
+{
+    if (vjo_overlay_ocr(a, p, cfg, src, out))
+        return out->err.rc;
+    return vjo_overlay_lookup(a, p, cfg, out);
 }
 
 const char *vjo_err_text(VjoArena *a, int stage, const VjoErr *err)

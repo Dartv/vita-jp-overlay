@@ -15,7 +15,7 @@ VitaJPOverlay_Kernel:
         - vjoWaitEvent
         - vjoGetState
         - vjoSetRegion
-        - vjoSetTrigger
+        - vjoSetTriggers
         - vjoSetGameActive
         - vjoSetInputBlock
         - vjoPollInput

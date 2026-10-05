@@ -29,6 +29,7 @@ enum { VJO_STAGE_NONE = 0, VJO_STAGE_OCR = 1, VJO_STAGE_DICT = 2 }; /* OCR, then
 typedef struct {
     const char *ocr_text;   /* Lens text (vjo_lens_text) */
     const char *filtered;   /* after non_japanese_filter */
+    const char *sentence;   /* filtered, trimmed: the header's text (and the subtitle) */
     VjoEntryList list;      /* header + entries */
     int failed_stage;
     VjoErr err;
@@ -57,11 +58,20 @@ const VjoDictBackend *vjo_dict_backend(int dictionary);
 int vjo_dict_lookup(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg, const char *text,
                     VjoDictResult *res, VjoErr *err);
 
-/* OCR text -> filter -> dictionary -> entries. */
+/* A recognition in two phases (the sentence is ready before the lookup):
+ * vjo_overlay_ocr: JPEG -> Lens -> filter, sets ocr_text, filtered and
+ * sentence; vjo_overlay_lookup: dictionary -> entries (list), after a
+ * successful vjo_overlay_ocr. Both return VJO_OK or the error, also in
+ * out->err with out->failed_stage. */
+int vjo_overlay_ocr(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg,
+                    const VjoJpegSource *src, VjoOverlayData *out);
+int vjo_overlay_lookup(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg, VjoOverlayData *out);
+
+/* OCR text -> filter -> vjo_overlay_lookup. */
 int vjo_overlay_from_text(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg,
                           const char *ocr_text, VjoOverlayData *out);
 
-/* JPEG -> Lens -> vjo_overlay_from_text. */
+/* vjo_overlay_ocr, then vjo_overlay_lookup. */
 int vjo_overlay_from_jpeg(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg,
                           const VjoJpegSource *src, VjoOverlayData *out);
 
