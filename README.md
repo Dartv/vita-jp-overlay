@@ -24,9 +24,9 @@ The idea comes from [meikidroid](https://github.com/rtr46/meikidroid)
   - `ur0:tai/VitaJPOverlay_Shell.suprx`
   - `ur0:data/VitaJPOverlay/vitajpoverlay.rco`
 3. Open `ur0:tai/config.txt` (or `ux0:tai/config.txt`, if that is the one your taiHEN uses) and
-   add two lines:
-   - `ur0:tai/VitaJPOverlay_Kernel.skprx` on a new line under `*KERNEL`
-   - `ur0:tai/VitaJPOverlay_Shell.suprx` on a new line under `*main`
+  add two lines:
+  - `ur0:tai/VitaJPOverlay_Kernel.skprx` on a new line under `*KERNEL`
+  - `ur0:tai/VitaJPOverlay_Shell.suprx` on a new line under `*main`
 4. Copy the zip's `config.ini` to `ux0:data/VitaJPOverlay/config.ini` and set your API key: `jiten_api_key`, or
   `dictionary = jpdb` and `jpdb_api_key`. Change any other settings you like. The file is read
    each time the overlay opens, so later changes need no reboot.
@@ -67,8 +67,11 @@ In the overlay:
 | ◀ ▶              | Previous or next word. The word is highlighted in the text and its definition is shown below.                                           |
 | ▲ ▼              | The word on the line above or below.                                                                                                    |
 | Either stick     | Scroll a long definition.                                                                                                               |
+| ×                | Add the word to Anki (when set up, see [Anki](#anki)). A green √ marks words already in your deck.                             |
 | □                | Choose the area to read. Drag a box on the touchscreen, then press × to keep it or ○ to cancel. Holding □ resets it to the full screen. |
 | ○, or the toggle | Close the overlay.                                                                                                                      |
+
+
 
 
 ## Settings
@@ -90,13 +93,47 @@ All settings live in `ux0:data/VitaJPOverlay/config.ini`.
 | `log_file`            | `on`, `off`                                                         | `off`   | Write a debug log to `ux0:data/VitaJPOverlay/log.txt` (256 KB at most, plus one older file). |
 
 
+
+
+## Anki
+
+× adds selected word to Anki, along with the reading, furigana, definitions, the sentence, a screenshot of the game and the frequency rank. Words already in your deck show a green √.
+
+1. In Anki, install [AnkiConnect](https://ankiweb.net/shared/info/2055492159).
+2. Tools → Add-ons → AnkiConnect → Config: set `"webBindAddress": "0.0.0.0"`, then restart Anki.
+3. In `config.ini`, set `anki_host = auto` (the Vita searches your network once and remembers the computer) or your computer's IP. Set `anki_deck` to your deck; it's created if missing.
+4. The default note type is [Lapis](https://github.com/donkuri/lapis). For another note type, set `anki_note_type` and the `anki_field_*` keys to its field names; leave a key empty to skip that data. Duplicates are checked on the note type's first field, so map the word to that field.
+
+
+| Key                     | Default              | What it does                                                                         |
+| ----------------------- | -------------------- | ------------------------------------------------------------------------------------ |
+| `anki_host`             | empty                | The computer running Anki: empty = off, `auto` = search the network, or `IP[:port]`. |
+| `anki_deck`             | `Default`            | Deck for new cards.                                                                  |
+| `anki_note_type`        | `Lapis`              | Note type for new cards.                                                             |
+| `anki_tags`             | `vita-jp-overlay`    | Tags for new cards, separated by spaces.                                             |
+| `anki_field_word`       | `Expression`         | Field for the word.                                                                  |
+| `anki_field_reading`    | `ExpressionReading`  | Field for the reading in kana.                                                       |
+| `anki_field_furigana`   | `ExpressionFurigana` | Field for the word with its reading, `言葉[ことば]`.                                      |
+| `anki_field_definition` | `MainDefinition`     | Field for the definitions, as a numbered list.                                       |
+| `anki_field_sentence`   | `Sentence`           | Field for the recognized text, with the word in bold.                                |
+| `anki_field_picture`    | `Picture`            | Field for the screenshot of the game.                                                |
+| `anki_field_frequency`  | `FreqSort`           | Field for the frequency rank.                                                        |
+
+
+
+
 ## Privacy
 
 - The chosen area of the screen is sent to Google Lens for text recognition. In `auto` mode
 that happens every time the area changes while a game is running.
 - The recognized text is sent to jiten.moe (`api.jiten.moe`) or jpdb.io, along with your API
 key.
+- With Anki set up, the cards (including the screenshot) go to Anki on your computer over your
+local network. `anki_host = auto` looks for it on port 8765 of the other devices on your
+network.
 - Nothing else leaves the console. Logs go only where `log_host` and `log_file` send them.
+
+
 
 ## Troubleshooting
 
@@ -135,6 +172,8 @@ cmake -S vita -B build/vita && cmake --build build/vita --target release
 VJO_JITEN_KEY=your-key ./build/host/vjo-cli --dict jiten screenshot.jpg --nav
 ```
 
+
+
 ## Credits
 
 - [meikidroid](https://github.com/rtr46/meikidroid) by rtr46 for the idea.
@@ -148,6 +187,8 @@ Electry and [reVita](https://github.com/MERLev/reVita) by MERLev for the hook pa
 usable from vitasdk.
 - [BearSSL](https://bearssl.org), [jsmn](https://github.com/zserge/jsmn) and
 [acutest](https://github.com/mity/acutest)
+
+
 
 ## License
 
