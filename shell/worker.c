@@ -26,8 +26,10 @@ VjoView g_view;
 
 static SceUID view_lock = -1;
 static SceUID cmd_lock = -1;
+static SceUID capture_lock = -1; /* the kernel's one raw buffer: OCR job vs Anki screenshot */
 static SceUID ctl_thread = -1, net_thread = -1;
 static int threads_started;
+static int anki_started; /* optional: the overlay runs without it */
 static SceUID net_evf = -1;
 static volatile int running = 1;
 
@@ -142,6 +144,9 @@ static void view_publish(int open, const VjoEntryList *list, const char *status,
     vjo_view_lock();
     __atomic_store_n(&g_view.open, open, __ATOMIC_RELEASE); /* also read unlocked (overlay frame) */
     g_view.list = list;
+    g_view.list_seq++;
+    g_view.anki_enabled = anki_started && cfg.anki_host[0] != '\0';
+    g_view.anki_status[0] = '\0'; /* the pre-check of a new list reports again */
     sceClibSnprintf(g_view.status, sizeof(g_view.status), "%s", status ? status : "");
     g_view.status_is_error = is_error;
     g_view.font_size_ja = cfg.font_size_ja;
@@ -159,6 +164,13 @@ static void view_show_cache(void)
     const char *err = d->err.rc ? vjo_err_text(&scratch, d->failed_stage, &d->err) : NULL;
     view_publish(1, &d->list, err, err != NULL);
     vjo_arena_release(&scratch, mark);
+    if (anki_started && cfg.anki_host[0] && d->list.n_entries > 0) {
+        unsigned seq;
+        vjo_view_lock();
+        seq = g_view.list_seq;
+        vjo_view_unlock();
+        vjo_anki_post_check(seq);
+    }
 }
 
 /* ---------------- network thread ---------------- */
@@ -179,55 +191,68 @@ static int raw_rows(void *ud, uint32_t row, uint32_t n, uint8_t *dst)
     return vjoReadRaw(row, n, dst);
 }
 
-static int run_job(VjoArena *a, VjoOverlayData *out, uint32_t *checksum)
+int vjo_capture_jpeg(VjoArena *a, uint32_t flags, int quality, VjoBuf *out, VjoState *st)
 {
-    VjoState st;
-    VjoJpegSource src;
-    VjoBuf jb;
-    MemJpeg mem;
-    int seq;
+    int seq, rc = VJO_OK;
     int64_t deadline, t0;
 
-    sceClibMemset(out, 0, sizeof(*out));
-    out->list.header = "";
-    seq = vjoRequestCapture();
+    /* Held until the last row is read: another request would invalidate them. */
+    sceKernelLockMutex(capture_lock, 1, NULL);
+    seq = vjoRequestCapture(flags);
     if (seq < 0) {
         vjo_log("capture request failed %d", seq);
-        out->failed_stage = VJO_STAGE_OCR;
-        out->err.rc = seq == VJO_ERR_NO_MEMORY ? VJO_E_OOM : VJO_E_SOURCE;
-        return out->err.rc;
+        rc = seq == VJO_ERR_NO_MEMORY ? VJO_E_OOM : VJO_E_SOURCE;
+        goto out;
     }
     /* CAPTURE_DONE may be left over from an earlier capture: the sequence
      * number decides which capture finished. */
     deadline = now_us() + CAPTURE_TIMEOUT_US;
     for (;;) {
         uint32_t bits = 0;
-        st.size = sizeof(st);
-        vjoGetState(&st);
-        if (st.done_seq == (uint32_t)seq)
+        st->size = sizeof(*st);
+        vjoGetState(st);
+        if (st->done_seq == (uint32_t)seq)
             break;
         if (now_us() >= deadline) {
             vjo_log("capture %d timed out", seq);
-            out->failed_stage = VJO_STAGE_OCR;
-            return out->err.rc = VJO_E_SOURCE;
+            rc = VJO_E_SOURCE;
+            goto out;
         }
         vjoWaitEvent(VJO_EV_CAPTURE_DONE, &bits, 100000);
     }
-    *checksum = st.capture_checksum;
-
-    if (st.capture_result != 0) {
-        vjo_log("capture failed %d", st.capture_result);
-        out->failed_stage = VJO_STAGE_OCR;
-        return out->err.rc = st.capture_result == VJO_ERR_NO_MEMORY ? VJO_E_OOM : VJO_E_SOURCE;
+    if (st->capture_result != 0) {
+        vjo_log("capture failed %d", st->capture_result);
+        rc = st->capture_result == VJO_ERR_NO_MEMORY ? VJO_E_OOM : VJO_E_SOURCE;
+        goto out;
     }
     t0 = now_us();
-    vjo_buf_init(&jb, a);
-    if (vjo_jpeg_encode(a, st.width, st.height, st.raw_stride, raw_rows, NULL, JPEG_QUALITY, &jb) < 0) {
-        out->failed_stage = VJO_STAGE_OCR;
-        return out->err.rc = jb.oom ? VJO_E_OOM : VJO_E_SOURCE;
+    if (vjo_jpeg_encode(a, st->width, st->height, st->raw_stride, raw_rows, NULL, quality, out) < 0) {
+        rc = out->oom ? VJO_E_OOM : VJO_E_SOURCE;
+        goto out;
     }
-    vjo_log("JPEG %ux%u -> %u bytes in %d ms", st.width, st.height, (unsigned)jb.len,
+    vjo_log("JPEG %ux%u -> %u bytes in %d ms", st->width, st->height, (unsigned)out->len,
             (int)((now_us() - t0) / 1000));
+out:
+    sceKernelUnlockMutex(capture_lock, 1);
+    return rc;
+}
+
+static int run_job(VjoArena *a, VjoOverlayData *out, uint32_t *checksum)
+{
+    VjoState st;
+    VjoJpegSource src;
+    VjoBuf jb;
+    MemJpeg mem;
+
+    sceClibMemset(out, 0, sizeof(*out));
+    out->list.header = "";
+    vjo_buf_init(&jb, a);
+    st.capture_checksum = 0;
+    if ((out->err.rc = vjo_capture_jpeg(a, 0, JPEG_QUALITY, &jb, &st)) != VJO_OK) {
+        out->failed_stage = VJO_STAGE_OCR;
+        return out->err.rc;
+    }
+    *checksum = st.capture_checksum;
     sceClibMemset(&src, 0, sizeof(src));
     src.width = st.width;
     src.height = st.height;
@@ -283,6 +308,7 @@ static void apply_config(void)
 {
     vjo_config_load(&cfg, &scratch);
     vjo_log_configure(&cfg);
+    vjo_anki_configure(&cfg);
     vjoSetTrigger(cfg.toggle_button);
     for (int i = 0; i < cfg.n_warnings; i++)
         vjo_log("config warning: %s", cfg.warnings[i]);
@@ -352,6 +378,8 @@ static void close_overlay(void)
     vjoSetInputBlock(0);
     vjo_view_lock();
     __atomic_store_n(&g_view.open, 0, __ATOMIC_RELEASE);
+    /* The next job may reuse the shown arena; an open republishes it. */
+    g_view.list = NULL;
     g_view.version++;
     vjo_view_unlock();
 }
@@ -576,16 +604,20 @@ int vjo_worker_start(void)
     }
     view_lock = sceKernelCreateMutex("VjoView", 0, 0, NULL);
     cmd_lock = sceKernelCreateMutex("VjoCmd", 0, 0, NULL);
+    capture_lock = sceKernelCreateMutex("VjoCapture", 0, 0, NULL);
     net_evf = sceKernelCreateEventFlag("VjoNetEv", 0, 0, NULL);
-    if (view_lock < 0 || cmd_lock < 0 || net_evf < 0) {
+    if (view_lock < 0 || cmd_lock < 0 || capture_lock < 0 || net_evf < 0) {
         vjo_worker_stop();
         return -1;
     }
+    anki_started = vjo_anki_start() == 0;
+    if (!anki_started)
+        vjo_log("anki: thread failed to start: Anki is off");
     vjo_platform_vita(&plat);
     vjo_arena_init(&scratch, scratch_mem, sizeof(scratch_mem));
     vjo_arena_init(&results[0], NULL, 0);
     vjo_arena_init(&results[1], NULL, 0);
-    apply_config(); /* logging and the trigger are set up before the first game */
+    apply_config(); /* logging, the trigger and Anki are set up before the first game */
     vjo_log("Vita JP Overlay shell started (kernel API %d)", ver);
 
     net_thread = sceKernelCreateThread("VjoNet", net_main, 0x10000100, 0x10000, 0, 0, NULL);
@@ -616,12 +648,16 @@ void vjo_worker_stop(void)
     if (ctl_thread >= 0)
         sceKernelDeleteThread(ctl_thread);
     net_thread = ctl_thread = -1;
+    vjo_anki_stop();
+    anki_started = 0;
     mem_free();
     if (net_evf >= 0)
         sceKernelDeleteEventFlag(net_evf);
     if (cmd_lock >= 0)
         sceKernelDeleteMutex(cmd_lock);
+    if (capture_lock >= 0)
+        sceKernelDeleteMutex(capture_lock);
     if (view_lock >= 0)
         sceKernelDeleteMutex(view_lock);
-    net_evf = cmd_lock = view_lock = -1;
+    net_evf = cmd_lock = capture_lock = view_lock = -1;
 }

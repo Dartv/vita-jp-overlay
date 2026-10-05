@@ -9,6 +9,19 @@
 enum { VJO_OCR_AUTO = 0, VJO_OCR_ON_PRESS = 1 };
 enum { VJO_DICT_JPDB = 0, VJO_DICT_JITEN = 1, VJO_DICT_COUNT };
 
+/* Data put on an Anki note, each into the field named by its
+ * anki_field_* setting ("" = not added). */
+enum {
+    VJO_ANKI_WORD = 0,   /* spelling */
+    VJO_ANKI_READING,    /* kana */
+    VJO_ANKI_FURIGANA,   /* 言葉[ことば] */
+    VJO_ANKI_DEFINITION, /* <ol><li>meaning</li>...</ol> */
+    VJO_ANKI_SENTENCE,   /* the recognized text, the word in <b> */
+    VJO_ANKI_PICTURE,    /* screenshot */
+    VJO_ANKI_FREQUENCY,  /* frequency rank */
+    VJO_ANKI_FIELD_COUNT
+};
+
 #define VJO_CONFIG_MAX_WARNINGS 4
 
 typedef struct {
@@ -21,6 +34,11 @@ typedef struct {
     int ocr_mode;             /* VJO_OCR_* */
     char log_host[64];        /* "" = UDP log off */
     int log_file;             /* 0/1 */
+    char anki_host[64];       /* see vjo_anki_endpoint */
+    char anki_deck[128];
+    char anki_note_type[64];
+    char anki_tags[128];      /* separated by spaces */
+    char anki_field[VJO_ANKI_FIELD_COUNT][64]; /* note field names, "" = skip */
     char warnings[VJO_CONFIG_MAX_WARNINGS][96];
     int n_warnings;
 } VjoConfig;
@@ -49,5 +67,12 @@ const char *vjo_dict_name(int dictionary); /* "jpdb.io" | "jiten.moe" */
 int vjo_dict_find(const char *id);
 /* API key of the selected dictionary ("" if unset). */
 const char *vjo_config_api_key(const VjoConfig *c);
+
+/* anki_host (or the saved anki_host.txt): "" = off, "auto" = search the
+ * network, or host[:port]. For VJO_ANKI_MANUAL, host (cap bytes) and port
+ * are set. Returns -1 for an invalid value. */
+#define VJO_ANKI_PORT 8765
+enum { VJO_ANKI_OFF = 0, VJO_ANKI_AUTO = 1, VJO_ANKI_MANUAL = 2 };
+int vjo_anki_endpoint(const char *setting, char *host, size_t cap, int *port);
 
 #endif

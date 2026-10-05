@@ -5,7 +5,7 @@
 
 #include <stdint.h>
 
-#define VJO_API_VERSION 4
+#define VJO_API_VERSION 5
 
 /* Normalized rectangle, 0..65535 on both axes. w == 0 means full screen. */
 typedef struct {
@@ -44,7 +44,7 @@ typedef struct {
     uint32_t alloc_status;
     int32_t capture_result; /* 0 ok (rows readable via vjoReadRaw), <0 error code */
     uint32_t width, height; /* captured region size in pixels */
-    uint32_t capture_checksum; /* region checksum of the captured frame */
+    uint32_t capture_checksum; /* checksum of the captured pixels (the region's, unless VJO_CAPTURE_FULL) */
     uint32_t raw_stride;    /* bytes per raw row (A8B8G8R8) */
     uint32_t done_seq;      /* sequence number of the last finished capture */
 } VjoState;
@@ -53,6 +53,9 @@ typedef struct {
     uint32_t buttons;       /* SCE_CTRL_* of the real pad, unfiltered */
     uint8_t lx, ly, rx, ry; /* analog sticks, 128 = centre */
 } VjoInput;
+
+/* vjoRequestCapture flags */
+#define VJO_CAPTURE_FULL 0x1u /* the whole frame instead of the region (Anki screenshot) */
 
 /* Kernel capture error codes (VjoState.capture_result) */
 #define VJO_ERR_NO_GAME      (-1)
@@ -76,7 +79,7 @@ int vjoSetTrigger(int trigger_id);
 int vjoSetGameActive(int pid, int active); /* shell: pid is a game (1) or a system app (0) */
 int vjoSetInputBlock(int on);            /* block all game input (not the shell) */
 int vjoPollInput(VjoInput *out);         /* raw pad, unfiltered */
-int vjoRequestCapture(void);             /* returns seq > 0; raw rows, the shell encodes the JPEG */
+int vjoRequestCapture(uint32_t flags);   /* VJO_CAPTURE_*; returns seq > 0; raw rows, the shell encodes the JPEG */
 int vjoReadRaw(uint32_t row, uint32_t n, void *dst);      /* returns rows copied */
 #endif
 

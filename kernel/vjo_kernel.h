@@ -54,6 +54,7 @@ typedef struct {
     volatile int raw_valid;
     uint32_t capture_seq;      /* bumped per request */
     uint32_t done_seq;         /* seq of the last finished capture */
+    int capture_full;          /* the pending capture is the whole frame (VJO_CAPTURE_FULL) */
 
     /* change detection */
     uint32_t checksum;

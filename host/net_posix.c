@@ -2,7 +2,10 @@
 #include "net_posix.h"
 #include "replay.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,7 +37,30 @@ static int sock_recv(void *ctx, void *p, size_t n)
     return r >= 0 ? (int)r : -1;
 }
 
-static int posix_connect(void *ud, const char *host, int port, VjoConn *out)
+/* connect(), giving up after timeout_us (0 = the OS's own timeout). */
+static int connect_timed(int fd, const struct sockaddr *addr, socklen_t len, int timeout_us)
+{
+    int flags, rc, err = 0;
+    socklen_t elen = sizeof(err);
+    struct pollfd pfd;
+    if (timeout_us <= 0)
+        return connect(fd, addr, len);
+    flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    rc = connect(fd, addr, len);
+    if (rc < 0 && errno == EINPROGRESS) {
+        pfd.fd = fd;
+        pfd.events = POLLOUT;
+        rc = poll(&pfd, 1, timeout_us / 1000) == 1 && getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &elen) == 0 &&
+                     err == 0
+                 ? 0
+                 : -1;
+    }
+    fcntl(fd, F_SETFL, flags);
+    return rc;
+}
+
+static int posix_connect(void *ud, const char *host, int port, int timeout_us, VjoConn *out)
 {
     struct addrinfo hints, *res, *ai;
     char portstr[8];
@@ -59,7 +85,7 @@ static int posix_connect(void *ud, const char *host, int port, VjoConn *out)
             setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
         }
 #endif
-        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0)
+        if (connect_timed(fd, ai->ai_addr, ai->ai_addrlen, timeout_us) == 0)
             break;
         close(fd);
         fd = -1;

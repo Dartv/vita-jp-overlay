@@ -90,7 +90,7 @@ typedef struct {
     VjoMemConn conn;
 } Replay;
 
-static int replay_connect(void *ud, const char *host, int port, VjoConn *out)
+static int replay_connect(void *ud, const char *host, int port, int timeout_us, VjoConn *out)
 {
     Replay *r = (Replay *)ud;
     char path[1024];
@@ -98,6 +98,7 @@ static int replay_connect(void *ud, const char *host, int port, VjoConn *out)
     const char *body;
     VjoBuf resp;
     (void)port;
+    (void)timeout_us;
     snprintf(path, sizeof(path), "%s/%s", r->dir, vjo_fixture_file(host));
     body = vjo_read_file(r->files, path, &len);
     if (!body)

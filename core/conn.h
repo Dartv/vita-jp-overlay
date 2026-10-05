@@ -28,6 +28,9 @@ enum {
     VJO_E_STATUS = -106,    /* non-2xx HTTP status */
     VJO_E_NO_KEY = -107,    /* dictionary API key not configured */
     VJO_E_SOURCE = -108,    /* JPEG source read failed */
+    VJO_E_ANKI = -109,      /* AnkiConnect reported an error (VjoErr.detail) */
+    VJO_E_NOT_FOUND = -110, /* no AnkiConnect found on the network */
+    VJO_E_ANKI_DUPLICATE = -111, /* AnkiConnect: the note is already in the deck */
 };
 
 #endif

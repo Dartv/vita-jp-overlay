@@ -72,3 +72,21 @@ char *vjo_java_trim(char *s)
         s++;
     return s;
 }
+
+static char ascii_lower(char c)
+{
+    return (char)(c >= 'A' && c <= 'Z' ? c + 32 : c);
+}
+
+int vjo_ieq_prefix(const char *s, const char *prefix)
+{
+    for (; *prefix; s++, prefix++)
+        if (ascii_lower(*s) != ascii_lower(*prefix))
+            return 0;
+    return 1;
+}
+
+int vjo_ieq(const char *a, const char *b)
+{
+    return vjo_ieq_prefix(a, b) && strlen(a) == strlen(b);
+}

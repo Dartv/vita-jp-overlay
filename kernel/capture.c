@@ -95,8 +95,9 @@ static int copy_from_game(void *dst, uintptr_t src, uint32_t len)
     return ksceKernelMemcpyUserToKernel(dst, (const void *)src, len);
 }
 
-/* Copies the region of a game frame into g.raw (A8B8G8R8, raw_stride bytes
- * per row). Display hook only (game context). */
+/* Copies the region (or, for a VJO_CAPTURE_FULL request, the whole frame)
+ * of a game frame into g.raw (A8B8G8R8, raw_stride bytes per row). Display
+ * hook only (game context). */
 int capture_copy(uintptr_t base, uint32_t pitch, uint32_t fmt, uint32_t w, uint32_t h)
 {
     uint32_t x, y, cw, ch, bpp, stride, hash = 2166136261u;
@@ -106,7 +107,13 @@ int capture_copy(uintptr_t base, uint32_t pitch, uint32_t fmt, uint32_t w, uint3
     if (fmt != FMT_A8B8G8R8 && fmt != FMT_A2B10G10R10 && fmt != FMT_BGRA5551)
         return VJO_ERR_FORMAT;
     bpp = fmt_bpp(fmt);
-    capture_compute_crop(w, h, &x, &y, &cw, &ch);
+    if (g.capture_full) {
+        x = y = 0;
+        cw = w > VJO_MAX_W ? VJO_MAX_W : w;
+        ch = h > VJO_MAX_H ? VJO_MAX_H : h;
+    } else {
+        capture_compute_crop(w, h, &x, &y, &cw, &ch);
+    }
     g.crop_w = cw;
     g.crop_h = ch;
     stride = g.raw_stride = cw * 4;

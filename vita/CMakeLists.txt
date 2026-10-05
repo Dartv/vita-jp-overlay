@@ -18,7 +18,7 @@ set(CMAKE_C_EXTENSIONS ON)
 include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
-set(VJO_VERSION "0.1")
+set(VJO_VERSION "0.2")
 
 # ---------------- kernel ----------------
 add_executable(VitaJPOverlay_Kernel
@@ -62,7 +62,8 @@ add_library(vjo_core_vita STATIC
   ${ROOT}/core/arena.c ${ROOT}/core/pb.c ${ROOT}/core/utf.c ${ROOT}/core/lens.c ${ROOT}/core/json.c
   ${ROOT}/core/jpdb.c ${ROOT}/core/textfilter.c ${ROOT}/core/entries.c ${ROOT}/core/jiten.c
   ${ROOT}/core/config.c ${ROOT}/core/regions.c ${ROOT}/core/http.c ${ROOT}/core/tls.c
-  ${ROOT}/core/tls_roots.c ${ROOT}/core/client.c ${ROOT}/core/styled.c ${ROOT}/core/jpegsw.c)
+  ${ROOT}/core/tls_roots.c ${ROOT}/core/client.c ${ROOT}/core/styled.c ${ROOT}/core/jpegsw.c
+  ${ROOT}/core/base64.c ${ROOT}/core/anki.c ${ROOT}/core/net.c)
 target_include_directories(vjo_core_vita PUBLIC ${ROOT}/core ${ROOT}/include)
 target_link_libraries(vjo_core_vita PUBLIC vjo_bearssl)
 target_compile_options(vjo_core_vita PRIVATE -O2 -Wall -Wextra -Wno-unused-parameter -fno-builtin -fshort-wchar
@@ -73,6 +74,7 @@ add_executable(VitaJPOverlay_Shell
   ${ROOT}/shell/main.cpp
   ${ROOT}/shell/overlay.cpp
   ${ROOT}/shell/worker.c
+  ${ROOT}/shell/anki.c
   ${ROOT}/shell/platform_vita.c
   ${ROOT}/shell/log_vita.c
   ${ROOT}/shell/files.c
