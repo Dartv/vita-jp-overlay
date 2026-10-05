@@ -54,43 +54,46 @@ Running it again later keeps your settings. `--uninstall` removes the plugin lin
 In a game:
 
 
-| Input | Action                                                                                                                                          |
-| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| L + R | Open or close the overlay. The game doesn't see L + R. `toggle_button` in `config.ini` picks another combination or a rear touchpad double tap. |
+| Input      | Action                                                                                                        |
+| ---------- | ------------------------------------------------------------------------------------------------------------- |
+| L + R      | Open or close the overlay (`toggle_button`).                                                                  |
+| Select + R | Subtitles on or off (`subtitle_button`): the recognized text in a strip at the top, updated as the game runs. |
 
 
 In the overlay:
 
 
-| Button           | Action                                                                                                                                  |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| ◀ ▶              | Previous or next word. The word is highlighted in the text and its definition is shown below.                                           |
-| ▲ ▼              | The word on the line above or below.                                                                                                    |
-| Either stick     | Scroll a long definition.                                                                                                               |
-| ×                | Add the word to Anki (when set up, see [Anki](#anki)). A green √ marks words already in your deck.                             |
-| □                | Choose the area to read. Drag a box on the touchscreen, then press × to keep it or ○ to cancel. Holding □ resets it to the full screen. |
-| ○, or the toggle | Close the overlay.                                                                                                                      |
+| Button           | Action                                                                                                                                       |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| ◀ ▶              | Previous or next word. The word is highlighted in the text and its definition is shown below.                                                |
+| ▲ ▼              | The word on the line above or below.                                                                                                         |
+| Either stick     | Scroll a long definition.                                                                                                                    |
+| ×                | Add the word to Anki (when set up, see [Anki](#anki)). A green √ marks words already in your deck.                                           |
+| □                | Choose the area to read in this game. Drag a box on the touchscreen, then press × to keep it or ○ to cancel. Holding □ sets the full screen. |
+| ○, or the toggle | Close the overlay.                                                                                                                           |
 
 
 
 
 ## Settings
 
-All settings live in `ux0:data/VitaJPOverlay/config.ini`.
+All settings live in `ux0:data/VitaJPOverlay/config.ini`. The area to read (□ in the overlay) is saved per game in
+`ux0:data/VitaJPOverlay/region.ini`.
 
 
-| Key                   | Values                                                              | Default | What it does                                                                                 |
-| --------------------- | ------------------------------------------------------------------- | ------- | -------------------------------------------------------------------------------------------- |
-| `dictionary`          | `jiten`, `jpdb`                                                     | `jiten` | Which dictionary looks up the words.                                                         |
-| `jiten_api_key`       | text                                                                | empty   | Your jiten.moe API key.                                                                      |
-| `jpdb_api_key`        | text                                                                | empty   | Your jpdb.io API key.                                                                        |
-| `non_japanese_filter` | `lines`, `none`                                                     | `lines` | Drop recognized lines with no kana or kanji.                                                 |
-| `font_size_ja`        | 8 to 40                                                             | 18      | Size of the Japanese text: the sentence, headwords and readings.                             |
-| `font_size_en`        | 8 to 40                                                             | 14      | Size of the English text: meanings and messages.                                             |
-| `toggle_button`       | `l+r`, `select`, `start`, `select+l`, `select+r`, `rear_double_tap` | `l+r`   | What opens and closes the overlay. Buttons are hidden from the game; rear taps are not.      |
-| `ocr_mode`            | `auto`, `on_press`                                                  | `auto`  | Recognize in the background, or only when the overlay opens.                                 |
-| `log_host`            | IPv4 address                                                        | empty   | Send debug logs to `tools/udp_log_listener.py` on that computer.                             |
-| `log_file`            | `on`, `off`                                                         | `off`   | Write a debug log to `ux0:data/VitaJPOverlay/log.txt` (256 KB at most, plus one older file). |
+| Key                   | Values                                                              | Default    | What it does                                                                                 |
+| --------------------- | ------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------------- |
+| `dictionary`          | `jiten`, `jpdb`                                                     | `jiten`    | Which dictionary looks up the words.                                                         |
+| `jiten_api_key`       | text                                                                | empty      | Your jiten.moe API key.                                                                      |
+| `jpdb_api_key`        | text                                                                | empty      | Your jpdb.io API key.                                                                        |
+| `non_japanese_filter` | `lines`, `none`                                                     | `lines`    | Drop recognized lines with no kana or kanji.                                                 |
+| `font_size_ja`        | 8 to 40                                                             | 18         | Size of the Japanese text: the sentence, headwords and readings.                             |
+| `font_size_en`        | 8 to 40                                                             | 14         | Size of the English text: meanings and messages.                                             |
+| `toggle_button`       | `l+r`, `select`, `start`, `select+l`, `select+r`, `rear_double_tap` | `l+r`      | What opens and closes the overlay. Buttons are hidden from the game; rear taps are not.      |
+| `subtitle_button`     | same as `toggle_button`                                             | `select+r` | What turns subtitles on and off.                                                             |
+| `ocr_mode`            | `auto`, `on_press`                                                  | `auto`     | Recognize in the background, or only when the overlay opens.                                 |
+| `log_host`            | IPv4 address                                                        | empty      | Send debug logs to `tools/udp_log_listener.py` on that computer.                             |
+| `log_file`            | `on`, `off`                                                         | `off`      | Write a debug log to `ux0:data/VitaJPOverlay/log.txt` (256 KB at most, plus one older file). |
 
 
 
@@ -124,8 +127,8 @@ All settings live in `ux0:data/VitaJPOverlay/config.ini`.
 
 ## Privacy
 
-- The chosen area of the screen is sent to Google Lens for text recognition. In `auto` mode
-that happens every time the area changes while a game is running.
+- The chosen area of the screen is sent to Google Lens for text recognition. In `auto` mode,
+and while subtitles are on, that happens every time the area changes while a game is running.
 - The recognized text is sent to jiten.moe (`api.jiten.moe`) or jpdb.io, along with your API
 key.
 - With Anki set up, the cards (including the screenshot) go to Anki on your computer over your
