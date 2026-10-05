@@ -164,7 +164,7 @@ static void rear_sample(void)
  * ports, which must not end a press. Pad calls can come from several game
  * threads: one at a time uses it, the others skip the delay. Reset when the
  * triggers change (g.trigger_gen). */
-#define COMBO_DELAY_US 200000 /* covers the gap between a combo's two presses */
+#define COMBO_DELAY_US 300000 /* covers the gap between a combo's two presses */
 #define HOLD_PORTS 5          /* 0 = the Vita's pad, 1-4 = PS TV controllers */
 
 static TrigHold hold[HOLD_PORTS][TRIG_COUNT];
