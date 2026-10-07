@@ -130,9 +130,7 @@ const char *vjo_config_default_text(void)
            "anki_field_frequency = FreqSort\n"
            "anki_field_audio = ExpressionAudio\n"
            "\n"
-           "; Word audio: a Yomitan custom audio source URL with {term} and {reading} in it, such as your\n"
-           "; yomitan-ultimate-audio worker (see README). Anki downloads the audio. Empty = no audio.\n"
-           "; https needs a certificate from a common CA (Let's Encrypt, Google, Cloudflare, Amazon, ...)\n"
+           "; Word audio: a Yomitan audio source URL with {term} and {reading} (empty = off)\n"
            "anki_audio_url =\n";
 }
 
