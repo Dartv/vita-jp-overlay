@@ -60,7 +60,7 @@ static int connect_timed(int fd, const struct sockaddr *addr, socklen_t len, int
     return rc;
 }
 
-static int posix_connect(void *ud, const char *host, int port, int timeout_us, VjoConn *out)
+static int posix_connect(void *ud, const char *host, int port, int timeout_us, int io_timeout_us, VjoConn *out)
 {
     struct addrinfo hints, *res, *ai;
     char portstr[8];
@@ -74,6 +74,10 @@ static int posix_connect(void *ud, const char *host, int port, int timeout_us, V
         return VJO_E_NET;
     for (ai = res; ai; ai = ai->ai_next) {
         struct timeval tv = {20, 0};
+        if (io_timeout_us > 0) {
+            tv.tv_sec = io_timeout_us / 1000000;
+            tv.tv_usec = io_timeout_us % 1000000;
+        }
         fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (fd < 0)
             continue;

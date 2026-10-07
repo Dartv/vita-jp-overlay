@@ -1,5 +1,6 @@
 #include "http.h"
 
+#include <stdarg.h>
 #include <string.h>
 
 #include "port.h"
@@ -18,24 +19,38 @@ int vjo_conn_send_all(VjoConn *c, const void *p, size_t n)
     return VJO_OK;
 }
 
+/* Appends to the request head; once it overflows, *n stays at cap. Output
+ * that fills the buffer counts as an overflow, whether vsnprintf returns
+ * the length it wanted (C) or the length it wrote. */
+static void head_add(char *head, size_t cap, size_t *n, const char *fmt, ...)
+{
+    va_list ap;
+    int k;
+    if (*n >= cap)
+        return;
+    va_start(ap, fmt);
+    k = vjo_vsnprintf(head + *n, cap - *n, fmt, ap);
+    va_end(ap);
+    *n = k < 0 || (size_t)k >= cap - *n - 1 ? cap : *n + (size_t)k;
+}
+
 int vjo_http_send(VjoConn *c, const VjoHttpRequest *req)
 {
     char head[1024];
-    int n = vjo_snprintf(head, sizeof(head),
-                         "%s %s HTTP/1.1\r\n"
-                         "Host: %s\r\n"
-                         "Content-Type: %s\r\n"
-                         "Content-Length: %lu\r\n"
-                         "Connection: close\r\n"
-                         "%s"
-                         "\r\n",
-                         req->method, req->path, req->host, req->content_type,
-                         (unsigned long)req->body_len,
-                         req->extra_headers ? req->extra_headers : "");
+    size_t n = 0;
     int rc;
-    if (n < 0 || (size_t)n >= sizeof(head))
+    head_add(head, sizeof(head), &n, "%s %s HTTP/1.1\r\nHost: %s", req->method, req->path, req->host);
+    if (req->host_port)
+        head_add(head, sizeof(head), &n, ":%d", req->host_port);
+    head_add(head, sizeof(head), &n, "\r\n");
+    if (req->content_type)
+        head_add(head, sizeof(head), &n, "Content-Type: %s\r\n", req->content_type);
+    if (req->body_len || req->write_body)
+        head_add(head, sizeof(head), &n, "Content-Length: %lu\r\n", (unsigned long)req->body_len);
+    head_add(head, sizeof(head), &n, "Connection: close\r\n%s\r\n", req->extra_headers ? req->extra_headers : "");
+    if (n >= sizeof(head))
         return VJO_E_HTTP;
-    rc = vjo_conn_send_all(c, head, (size_t)n);
+    rc = vjo_conn_send_all(c, head, n);
     if (rc)
         return rc;
     return req->write_body ? req->write_body(req->ud, c) : VJO_OK;

@@ -19,6 +19,7 @@ enum {
     VJO_ANKI_SENTENCE,   /* the recognized text, the word in <b> */
     VJO_ANKI_PICTURE,    /* screenshot */
     VJO_ANKI_FREQUENCY,  /* frequency rank */
+    VJO_ANKI_AUDIO,      /* the word's pronunciation, downloaded by Anki */
     VJO_ANKI_FIELD_COUNT
 };
 
@@ -40,6 +41,7 @@ typedef struct {
     char anki_note_type[64];
     char anki_tags[128];      /* separated by spaces */
     char anki_field[VJO_ANKI_FIELD_COUNT][64]; /* note field names, "" = skip */
+    char anki_audio_url[256]; /* "" = no word audio; see vjo_anki_audio_endpoint */
     char warnings[VJO_CONFIG_MAX_WARNINGS][96];
     int n_warnings;
 } VjoConfig;
@@ -75,5 +77,13 @@ const char *vjo_config_api_key(const VjoConfig *c);
 #define VJO_ANKI_PORT 8765
 enum { VJO_ANKI_OFF = 0, VJO_ANKI_AUTO = 1, VJO_ANKI_MANUAL = 2 };
 int vjo_anki_endpoint(const char *setting, char *host, size_t cap, int *port);
+
+/* anki_audio_url: a Yomitan custom audio source,
+ * http(s)://host[:port][/path][?query] with {term} (and usually {reading})
+ * in it. Sets host (VJO_HOST_MAX bytes), port, tls and the path template
+ * (in url, from the '/' or '?' after the host; "" for none). Returns 0, or
+ * -1 for an invalid or empty value. */
+#define VJO_HOST_MAX 128
+int vjo_anki_audio_endpoint(const char *url, char *host, int *port, int *tls, const char **path);
 
 #endif
