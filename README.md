@@ -108,7 +108,7 @@ All settings live in `ux0:data/VitaJPOverlay/config.ini`. The area to read (□ 
 2. Tools → Add-ons → AnkiConnect → Config: set `"webBindAddress": "0.0.0.0"`, then restart Anki.
 3. In `config.ini`, set `anki_host = auto` (the Vita searches your network once and remembers the computer) or your computer's IP. Set `anki_deck` to your deck; it's created if missing.
 4. The default note type is [Lapis](https://github.com/donkuri/lapis). For another note type, set `anki_note_type` and the `anki_field_*` keys to its field names; leave a key empty to skip that data. Duplicates are checked on the note type's first field, so map the word to that field.
-5. Optional, word audio: set `anki_audio_url` to a Yomitan custom audio source URL, the same one you'd paste into Yomitan, with `{term}` and `{reading}` in it. To host your own, see [yomitan-ultimate-audio](https://github.com/friedrich-de/yomitan-ultimate-audio?tab=readme-ov-file). The Vita looks up the word there and Anki downloads the audio. An `https` source needs a certificate from a common CA (Let's Encrypt, Google, Cloudflare, Amazon, DigiCert, Sectigo or SSL.com); on your own network, `http` works too. If the lookup fails, the card is added without audio and the overlay says why.
+5. Optional, word audio: set `anki_audio_url` to a Yomitan custom audio source URL, the same one you'd paste into Yomitan, with `{term}` and `{reading}` in it. To host your own, see [yomitan-ultimate-audio](https://github.com/friedrich-de/yomitan-ultimate-audio?tab=readme-ov-file). The Vita looks up the word there and Anki downloads the audio.
 
 
 | Key                     | Default              | What it does                                                                         |
