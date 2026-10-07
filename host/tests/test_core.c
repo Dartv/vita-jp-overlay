@@ -452,8 +452,8 @@ static void fg_game_running(VjoForeground *f)
     TEST_CHECK(fg_process_event(f, SHELL, PROCEV_RESUME) == 0); /* the shell never is the game */
     TEST_CHECK(fg_process_event(f, GAME, PROCEV_STARTUP) == IEV_GAME_START);
     TEST_CHECK(fg_is(f, GAME, 0, 0));
-    TEST_CHECK(fg_set_game_active(f, GAME, 1, &iev) == 0 && iev == IEV_ACTIVATE);
-    TEST_CHECK(fg_is(f, GAME, 1, 0));
+    TEST_CHECK(fg_set_game_active(f, GAME, VJO_GAME, &iev) == 0 && iev == IEV_ACTIVATE);
+    TEST_CHECK(fg_is(f, GAME, VJO_GAME, 0));
     TEST_CHECK(fg_process_event(f, GAME, PROCEV_RESUME) == 0); /* already the foreground */
 }
 
@@ -467,12 +467,12 @@ static void test_foreground(void)
     fg_game_running(&f);
     TEST_CHECK(fg_process_event(&f, APP, PROCEV_STARTUP) == IEV_GAME_START);
     TEST_CHECK(fg_is(&f, APP, 0, GAME));
-    TEST_CHECK(fg_set_game_active(&f, GAME, 1, &iev) < 0 && iev == 0); /* not the foreground */
+    TEST_CHECK(fg_set_game_active(&f, GAME, VJO_GAME, &iev) < 0 && iev == 0); /* not the foreground */
     TEST_CHECK(fg_is(&f, APP, 0, GAME));
-    TEST_CHECK(fg_set_game_active(&f, APP, 0, &iev) == 0 && iev == IEV_GAME_START);
+    TEST_CHECK(fg_set_game_active(&f, APP, VJO_GAME_NONE, &iev) == 0 && iev == IEV_GAME_START);
     TEST_CHECK(fg_is(&f, GAME, 0, 0));
-    TEST_CHECK(fg_set_game_active(&f, GAME, 1, &iev) == 0 && iev == IEV_ACTIVATE);
-    TEST_CHECK(fg_is(&f, GAME, 1, 0));
+    TEST_CHECK(fg_set_game_active(&f, GAME, VJO_GAME, &iev) == 0 && iev == IEV_ACTIVATE);
+    TEST_CHECK(fg_is(&f, GAME, VJO_GAME, 0));
 
     /* The newcomer exits before it is classified: back to the game. */
     fg_game_running(&f);
@@ -487,7 +487,7 @@ static void test_foreground(void)
     TEST_CHECK(fg_process_event(&f, APP, PROCEV_STARTUP) == IEV_GAME_START);
     TEST_CHECK(fg_process_event(&f, GAME, PROCEV_SUSPEND) == 0);
     TEST_CHECK(fg_is(&f, APP, 0, 0));
-    TEST_CHECK(fg_set_game_active(&f, APP, 0, &iev) == 0 && iev == 0);
+    TEST_CHECK(fg_set_game_active(&f, APP, VJO_GAME_NONE, &iev) == 0 && iev == 0);
     TEST_CHECK(fg_is(&f, APP, 0, 0));
     TEST_CHECK(fg_process_event(&f, GAME, PROCEV_RESUME) == IEV_GAME_START);
     TEST_CHECK(fg_is(&f, GAME, 0, 0));
@@ -501,9 +501,9 @@ static void test_foreground(void)
     TEST_CHECK(fg_process_event(&f, APP, PROCEV_STARTUP) == IEV_GAME_START);
     TEST_CHECK(fg_process_event(&f, APP2, PROCEV_STARTUP) == IEV_GAME_START);
     TEST_CHECK(fg_is(&f, APP2, 0, GAME));
-    TEST_CHECK(fg_set_game_active(&f, APP, 0, &iev) < 0 && iev == 0);
+    TEST_CHECK(fg_set_game_active(&f, APP, VJO_GAME_NONE, &iev) < 0 && iev == 0);
     TEST_CHECK(fg_is(&f, APP2, 0, GAME));
-    TEST_CHECK(fg_set_game_active(&f, APP2, 0, &iev) == 0 && iev == IEV_GAME_START);
+    TEST_CHECK(fg_set_game_active(&f, APP2, VJO_GAME_NONE, &iev) == 0 && iev == IEV_GAME_START);
     TEST_CHECK(fg_is(&f, GAME, 0, 0));
     TEST_CHECK(fg_process_event(&f, APP, PROCEV_EXIT) == 0);
     TEST_CHECK(fg_is(&f, GAME, 0, 0));
@@ -513,20 +513,34 @@ static void test_foreground(void)
      * classifies itself as not a game. */
     fg_game_running(&f);
     TEST_CHECK(fg_process_event(&f, SHELL, PROCEV_EXIT) == 0);
-    TEST_CHECK(fg_is(&f, GAME, 1, 0));
+    TEST_CHECK(fg_is(&f, GAME, VJO_GAME, 0));
     TEST_CHECK(fg_process_event(&f, SHELL2, PROCEV_STARTUP) == IEV_GAME_START);
     TEST_CHECK(fg_is(&f, SHELL2, 0, GAME));
     f.shell_pid = SHELL2; /* vjoRegisterShell */
-    TEST_CHECK(fg_set_game_active(&f, SHELL2, 0, &iev) == 0 && iev == IEV_GAME_START);
+    TEST_CHECK(fg_set_game_active(&f, SHELL2, VJO_GAME_NONE, &iev) == 0 && iev == IEV_GAME_START);
     TEST_CHECK(fg_is(&f, GAME, 0, 0));
     TEST_CHECK(fg_process_event(&f, SHELL2, PROCEV_RESUME) == 0);
-    TEST_CHECK(fg_set_game_active(&f, GAME, 1, &iev) == 0 && iev == IEV_ACTIVATE);
-    TEST_CHECK(fg_is(&f, GAME, 1, 0));
+    TEST_CHECK(fg_set_game_active(&f, GAME, VJO_GAME, &iev) == 0 && iev == IEV_ACTIVATE);
+    TEST_CHECK(fg_is(&f, GAME, VJO_GAME, 0));
 
-    /* The game exits with nothing behind it; pid 0 is never the foreground. */
+    /* A static framebuffer game keeps its mode until a system app opens over
+     * it: it comes back inactive, to be re-classified by the shell. */
+    fg_game_running(&f);
+    TEST_CHECK(fg_set_game_active(&f, GAME, VJO_GAME_STATIC_FB, &iev) == 0 && iev == IEV_ACTIVATE);
+    TEST_CHECK(fg_is(&f, GAME, VJO_GAME_STATIC_FB, 0));
+    TEST_CHECK(fg_process_event(&f, APP, PROCEV_STARTUP) == IEV_GAME_START);
+    TEST_CHECK(fg_is(&f, APP, 0, GAME));
+    TEST_CHECK(fg_set_game_active(&f, APP, VJO_GAME_NONE, &iev) == 0 && iev == IEV_GAME_START);
+    TEST_CHECK(fg_is(&f, GAME, 0, 0));
+    TEST_CHECK(fg_set_game_active(&f, GAME, VJO_GAME_STATIC_FB, &iev) == 0 && iev == IEV_ACTIVATE);
     TEST_CHECK(fg_process_event(&f, GAME, PROCEV_EXIT) == IEV_GAME_EXIT);
     TEST_CHECK(fg_is(&f, 0, 0, 0));
-    TEST_CHECK(fg_set_game_active(&f, 0, 1, &iev) < 0);
+
+    /* The game exits with nothing behind it; pid 0 is never the foreground. */
+    fg_game_running(&f);
+    TEST_CHECK(fg_process_event(&f, GAME, PROCEV_EXIT) == IEV_GAME_EXIT);
+    TEST_CHECK(fg_is(&f, 0, 0, 0));
+    TEST_CHECK(fg_set_game_active(&f, 0, VJO_GAME, &iev) < 0);
 }
 
 /* ---------- config / regions ---------- */

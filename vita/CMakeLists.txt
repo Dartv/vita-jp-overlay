@@ -18,7 +18,7 @@ set(CMAKE_C_EXTENSIONS ON)
 include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
-set(VJO_VERSION "0.3")
+set(VJO_VERSION "0.4")
 
 # ---------------- kernel ----------------
 add_executable(VitaJPOverlay_Kernel

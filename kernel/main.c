@@ -301,14 +301,16 @@ int vjoSetRegion(const VjoRect *r)
 
 /* The shell enables the kernel for the current foreground process once it
  * has checked that it is a game (not a system app). */
-int vjoSetGameActive(int pid, int active)
+int vjoSetGameActive(int pid, int mode)
 {
     uint32_t state;
     int ret;
     if (!caller_ok())
         return VJO_ERR_PERM;
+    if (mode < VJO_GAME_NONE || mode > VJO_GAME_STATIC_FB)
+        return VJO_ERR_ARG;
     ENTER_SYSCALL(state);
-    ret = lifecycle_set_game_active(pid, active);
+    ret = lifecycle_set_game_active(pid, mode);
     EXIT_SYSCALL(state);
     return ret;
 }
@@ -319,7 +321,7 @@ int vjoSetTriggers(int toggle, int subtitle)
         return VJO_ERR_PERM;
     if (toggle < 0 || toggle >= VJO_TRIGGER_COUNT || subtitle < 0 || subtitle >= VJO_TRIGGER_COUNT ||
         toggle == subtitle)
-        return -1;
+        return VJO_ERR_ARG;
     if (g.trigger[TRIG_TOGGLE] != toggle || g.trigger[TRIG_SUBTITLE] != subtitle) {
         g.trigger[TRIG_TOGGLE] = toggle;
         g.trigger[TRIG_SUBTITLE] = subtitle;

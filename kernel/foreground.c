@@ -34,13 +34,13 @@ uint32_t fg_process_event(VjoForeground *f, int pid, int ev)
     return 0;
 }
 
-int fg_set_game_active(VjoForeground *f, int pid, int active, uint32_t *iev)
+int fg_set_game_active(VjoForeground *f, int pid, int mode, uint32_t *iev)
 {
     *iev = 0;
     if (pid <= 0 || pid != f->game_pid)
         return -1;
-    if (active) {
-        f->game_active = 1;
+    if (mode) {
+        f->game_active = mode;
         *iev = IEV_ACTIVATE;
     } else {
         f->game_active = 0;

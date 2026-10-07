@@ -49,18 +49,18 @@ out:
 }
 
 /* vjoSetGameActive: the shell's verdict on the foreground process. */
-int lifecycle_set_game_active(SceUID pid, int active)
+int lifecycle_set_game_active(SceUID pid, int mode)
 {
     VjoForeground f;
     uint32_t iev;
     int ret = 0;
     ksceKernelLockMutex(g.game_lock, 1, NULL);
     f = fg_load();
-    if (fg_set_game_active(&f, pid, active, &iev) < 0) {
+    if (fg_set_game_active(&f, pid, mode, &iev) < 0) {
         ret = VJO_ERR_NO_GAME;
     } else {
-        if (active)
-            klog("game pid 0x%X active", pid);
+        if (mode)
+            klog("game pid 0x%X active%s", pid, mode == VJO_GAME_STATIC_FB ? " (static framebuffer)" : "");
         else if (iev & IEV_GAME_START)
             klog("pid 0x%X is not a game: back to game pid 0x%X", pid, f.game_pid);
         fg_store(&f, iev);

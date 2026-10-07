@@ -14,8 +14,8 @@
 #include "triggers.h"   /* TRIG_* */
 
 #define CAPTURE_IDLE    0
-#define CAPTURE_PENDING 1     /* the next game frame is copied in the hook */
-#define CAPTURE_COPYING 2     /* claimed (CAS from PENDING) by the hook or the worker */
+#define CAPTURE_PENDING 1     /* the next game frame is copied in game context (display.c) */
+#define CAPTURE_COPYING 2     /* claimed (CAS from PENDING) by a hook or the worker */
 #define CAPTURE_COPIED  3     /* copy finished; the worker publishes the result */
 
 #define VJO_MAX_W 960
@@ -31,10 +31,10 @@ typedef struct {
 
     /* foreground game (VjoForeground in foreground.h) */
     volatile SceUID game_pid;
-    volatile int game_active;  /* the shell confirmed game_pid is a game */
+    volatile int game_active;  /* the shell confirmed game_pid is a game: its VJO_GAME* mode */
     SceUID prev_game_pid;      /* confirmed game behind game_pid, still running */
 
-    /* last frame the game submitted (index 0, primary head) */
+    /* last game frame seen (index 0, primary head; submitted or sampled) */
     volatile uint32_t fb_pitch, fb_fmt, fb_w, fb_h;
 
     /* OCR region (normalized), set by the shell */
@@ -105,11 +105,12 @@ void input_poll(void);
 /* lifecycle.c */
 int lifecycle_hooks_install(void);
 void lifecycle_hooks_release(void);
-int lifecycle_set_game_active(SceUID pid, int active);
+int lifecycle_set_game_active(SceUID pid, int mode);
 
 /* display.c */
 int display_hook_install(void);
 void display_hook_release(void);
+void display_static_fb_sample(void); /* game context, from its pad calls */
 
 #define VJO_LOCK() ksceKernelLockMutex(g.lock, 1, NULL)
 #define VJO_UNLOCK() ksceKernelUnlockMutex(g.lock, 1)
