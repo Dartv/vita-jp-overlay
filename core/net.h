@@ -12,9 +12,11 @@
 
 typedef struct {
     void *ud;
-    /* Opens a TCP connection, giving up after timeout_us (0 = the
-     * platform's default); returns VJO_OK or VJO_E_NET. */
-    int (*connect)(void *ud, const char *host, int port, int timeout_us, VjoConn *out);
+    /* Opens a TCP connection, giving up after timeout_us (DNS included
+     * where the platform can), with reads and writes that each give up
+     * after io_timeout_us (0 = the platform's default for either); returns
+     * VJO_OK or VJO_E_NET. */
+    int (*connect)(void *ud, const char *host, int port, int timeout_us, int io_timeout_us, VjoConn *out);
     void (*disconnect)(void *ud, VjoConn *c);
     void (*random)(void *ud, void *buf, size_t n);
     uint64_t (*unix_time)(void *ud);

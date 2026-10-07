@@ -219,7 +219,12 @@ static void put_tags(VjoBuf *b, const char *t)
     vjo_buf_putc(b, ']');
 }
 
-/* The HTML value of a VJO_ANKI_* field other than the picture. */
+static int is_media(int field)
+{
+    return field == VJO_ANKI_PICTURE || field == VJO_ANKI_AUDIO;
+}
+
+/* The HTML value of a VJO_ANKI_* field that is not media. */
 static char *value(VjoArena *a, int field, const VjoAnkiNote *n)
 {
     VjoBuf b;
@@ -239,18 +244,28 @@ static char *value(VjoArena *a, int field, const VjoAnkiNote *n)
     return vjo_buf_cstr(&b);
 }
 
-int vjo_anki_add_request(VjoArena *a, const VjoConfig *cfg, const VjoAnkiNote *n, const char *picture_name,
+/* "audio"/"picture":[{"filename":..,"fields":[field], then the source */
+static void put_media(VjoBuf *b, const char *kind, const char *name, const char *field)
+{
+    vjo_buf_printf(b, ",\"%s\":[{\"filename\":", kind);
+    vjo_json_write_string(b, name);
+    vjo_buf_puts(b, ",\"fields\":[");
+    vjo_json_write_string(b, field);
+    vjo_buf_puts(b, "],");
+}
+
+int vjo_anki_add_request(VjoArena *a, const VjoConfig *cfg, const VjoAnkiNote *n, const VjoAnkiMedia *m,
                          VjoAnkiBody *out)
 {
     char *v[VJO_ANKI_FIELD_COUNT];
-    const char *pic = cfg->anki_field[VJO_ANKI_PICTURE];
+    const char *pic = cfg->anki_field[VJO_ANKI_PICTURE], *audio = cfg->anki_field[VJO_ANKI_AUDIO];
     int first = 1;
     VjoBuf b;
     memset(out, 0, sizeof(*out));
     /* Values first, so the request below grows in place. */
     for (int f = 0; f < VJO_ANKI_FIELD_COUNT; f++) {
         v[f] = NULL;
-        if (f != VJO_ANKI_PICTURE && cfg->anki_field[f][0] && !(v[f] = value(a, f, n)))
+        if (!is_media(f) && cfg->anki_field[f][0] && !(v[f] = value(a, f, n)))
             return -1;
         if (v[f] && !*v[f])
             v[f] = NULL; /* nothing to add (no rank, no meanings) */
@@ -272,12 +287,17 @@ int vjo_anki_add_request(VjoArena *a, const VjoConfig *cfg, const VjoAnkiNote *n
     vjo_buf_puts(&b, "},");
     put_tags(&b, cfg->anki_tags);
     put_options(&b, cfg);
-    if (picture_name && *pic) {
-        vjo_buf_puts(&b, ",\"picture\":[{\"filename\":");
-        vjo_json_write_string(&b, picture_name);
-        vjo_buf_puts(&b, ",\"fields\":[");
-        vjo_json_write_string(&b, pic);
-        vjo_buf_puts(&b, "],\"data\":\"");
+    if (m->audio_url && m->audio_name && *audio) {
+        put_media(&b, "audio", m->audio_name, audio);
+        vjo_buf_puts(&b, "\"url\":");
+        vjo_json_write_string(&b, m->audio_url);
+        vjo_buf_puts(&b, "}]");
+    }
+    if (m->picture_len && m->picture_name && *pic) {
+        put_media(&b, "picture", m->picture_name, pic);
+        vjo_buf_puts(&b, "\"data\":\"");
+        out->picture = m->picture;
+        out->picture_len = m->picture_len;
         out->suffix = "\"}]}}}";
     } else {
         vjo_buf_puts(&b, "}}}");
@@ -293,9 +313,121 @@ int vjo_anki_add_request(VjoArena *a, const VjoConfig *cfg, const VjoAnkiNote *n
     return 0;
 }
 
-void vjo_anki_picture_name(char *out, size_t cap, uint32_t unix_s, uint32_t ms)
+void vjo_anki_media_name(char *out, size_t cap, uint64_t unix_ms, const char *ext)
 {
-    vjo_snprintf(out, cap, "vitajp_%u%03u.jpg", (unsigned)unix_s, (unsigned)(ms % 1000));
+    vjo_snprintf(out, cap, "vitajp_%u%03u.%s", (unsigned)(unix_ms / 1000u), (unsigned)(unix_ms % 1000u), ext);
+}
+
+/* ---------------- word audio ---------------- */
+
+#define AUDIO_CONNECT_TIMEOUT_US (3 * 1000 * 1000)
+#define AUDIO_IO_TIMEOUT_US (5 * 1000 * 1000) /* a stalled source: not the default 20 s */
+#define AUDIO_NAME_CAP 40
+
+int vjo_anki_audio_enabled(const VjoConfig *cfg)
+{
+    return cfg->anki_audio_url[0] && cfg->anki_field[VJO_ANKI_AUDIO][0];
+}
+
+static void url_encode(VjoBuf *b, const char *s)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    for (; *s; s++) {
+        uint8_t c = (uint8_t)*s;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' ||
+            c == '.' || c == '~') {
+            vjo_buf_putc(b, (char)c);
+        } else {
+            vjo_buf_putc(b, '%');
+            vjo_buf_putc(b, hex[c >> 4]);
+            vjo_buf_putc(b, hex[c & 15]);
+        }
+    }
+}
+
+char *vjo_anki_audio_path(VjoArena *a, const char *path_template, const char *term, const char *reading)
+{
+    const char *t = path_template;
+    VjoBuf b;
+    if (!reading || !*reading)
+        reading = term;
+    vjo_buf_init(&b, a);
+    if (*t != '/')
+        vjo_buf_putc(&b, '/');
+    while (*t) {
+        if (!strncmp(t, "{term}", 6)) {
+            url_encode(&b, term);
+            t += 6;
+        } else if (!strncmp(t, "{reading}", 9)) {
+            url_encode(&b, reading);
+            t += 9;
+        } else if (!strncmp(t, "{language}", 10)) {
+            vjo_buf_puts(&b, "ja");
+            t += 10;
+        } else {
+            vjo_buf_putc(&b, *t++);
+        }
+    }
+    return b.oom ? NULL : vjo_buf_cstr(&b);
+}
+
+static int is_http_url(const char *s)
+{
+    return starts_with(s, "https://") || starts_with(s, "http://");
+}
+
+/* {"type": "audioSourceList", "audioSources": [{"name": ..., "url": ...}, ...]} */
+int vjo_anki_audio_parse(VjoArena *a, const char *json, size_t len, const char **url)
+{
+    VjoJson j;
+    int list;
+    *url = NULL;
+    if (vjo_json_parse(a, json, len, &j) < 0 || !vjo_json_is_type(&j, 0, JSMN_OBJECT))
+        return VJO_E_PARSE;
+    list = vjo_json_obj_get(&j, 0, "audioSources");
+    if (!vjo_json_is_type(&j, list, JSMN_ARRAY))
+        return VJO_E_PARSE;
+    for (int k = 0; k < j.t[list].size; k++) {
+        int u = vjo_json_obj_get(&j, vjo_json_arr_get(&j, list, k), "url");
+        const char *s;
+        if (!vjo_json_is_type(&j, u, JSMN_STRING))
+            continue;
+        if (!(s = vjo_json_str(a, &j, u)))
+            return VJO_E_OOM;
+        if (is_http_url(s)) {
+            *url = s;
+            break;
+        }
+    }
+    return VJO_OK;
+}
+
+const char *vjo_anki_audio_ext(const char *url)
+{
+    static const char *const known[] = {"mp3", "ogg", "opus", "oga", "m4a", "aac", "wav", "flac", "webm"};
+    const char *path = strstr(url, "://"), *ext = NULL;
+    char e[8];
+    size_t n = 0;
+    path = path ? path + 3 : url;
+    while (*path && *path != '/') /* past the host */
+        path++;
+    for (; *path && *path != '?' && *path != '#'; path++) {
+        if (*path == '/')
+            ext = NULL;
+        else if (*path == '.')
+            ext = path + 1;
+    }
+    if (!ext)
+        return "mp3";
+    while (ext + n < path && n < sizeof(e) - 1) {
+        char c = ext[n];
+        e[n++] = c >= 'A' && c <= 'Z' ? (char)(c - 'A' + 'a') : c;
+    }
+    e[n] = '\0';
+    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++)
+        if (ext + n == path && !strcmp(e, known[i]))
+            return known[i];
+    return "mp3";
 }
 
 /* ---------------- replies ---------------- */
@@ -436,20 +568,15 @@ int vjo_anki_check(VjoArena *a, const VjoPlatform *p, const char *host, int port
 }
 
 int vjo_anki_add(VjoArena *a, const VjoPlatform *p, const char *host, int port, const VjoConfig *cfg,
-                 const VjoAnkiNote *n, const uint8_t *jpeg, size_t jpeg_len, const char *picture_name,
-                 VjoErr *err)
+                 const VjoAnkiNote *n, const VjoAnkiMedia *m, VjoErr *err)
 {
     VjoAnkiBody note, deck;
     VjoJson j;
     int r;
     char *create;
     memset(err, 0, sizeof(*err));
-    if (vjo_anki_add_request(a, cfg, n, jpeg_len ? picture_name : NULL, &note) < 0)
+    if (vjo_anki_add_request(a, cfg, n, m, &note) < 0)
         return err->rc = VJO_E_OOM;
-    if (note.suffix_len) { /* the request has a picture */
-        note.picture = jpeg;
-        note.picture_len = jpeg_len;
-    }
     if (call(a, p, host, port, &note, &j, &r, err) != VJO_E_ANKI || !starts_with(err->detail, ERR_NO_DECK))
         return err->rc;
     /* The first note of a new deck. */
@@ -459,6 +586,71 @@ int vjo_anki_add(VjoArena *a, const VjoPlatform *p, const char *host, int port, 
     if (call(a, p, host, port, &deck, &j, &r, err))
         return err->rc;
     return call(a, p, host, port, &note, &j, &r, err);
+}
+
+static int audio_lookup(VjoArena *a, const VjoPlatform *p, const char *audio_url, const VjoAnkiNote *n,
+                        const char **url, VjoErr *err)
+{
+    VjoHttpRequest req;
+    VjoHttpResponse resp;
+    const char *path;
+    char host[VJO_HOST_MAX];
+    int port, tls;
+    if (vjo_anki_audio_endpoint(audio_url, host, &port, &tls, &path) < 0)
+        return err->rc = VJO_E_PARSE;
+    memset(&req, 0, sizeof(req));
+    req.method = "GET";
+    req.host = host;
+    req.connect_timeout_us = AUDIO_CONNECT_TIMEOUT_US;
+    req.io_timeout_us = AUDIO_IO_TIMEOUT_US;
+    if (!(req.path = vjo_anki_audio_path(a, path, n->spelling, n->reading)))
+        return err->rc = VJO_E_OOM;
+    if (vjo_http_request(a, p, port, tls, &req, VJO_ANKI_AUDIO_MAX_RESPONSE, &resp, err))
+        return err->rc;
+    return err->rc = vjo_anki_audio_parse(a, resp.body, resp.body_len, url);
+}
+
+int vjo_anki_find_audio(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg, const VjoAnkiNote *n,
+                        uint64_t unix_ms, VjoAnkiMedia *m, VjoErr *err)
+{
+    size_t mark = vjo_arena_mark(a), len;
+    const char *url = NULL;
+    char *keep;
+    memset(err, 0, sizeof(*err));
+    m->audio_url = m->audio_name = NULL;
+    if (audio_lookup(a, p, cfg->anki_audio_url, n, &url, err) || !url) {
+        vjo_arena_release(a, mark);
+        return err->rc;
+    }
+    /* Keep just the URL: the reply and its tokens go back to the arena.
+     * The copy lands at or below the URL, so memmove. */
+    len = strlen(url);
+    vjo_arena_release(a, mark);
+    if (!(keep = (char *)vjo_arena_alloc(a, len + 1 + AUDIO_NAME_CAP)))
+        return err->rc = VJO_E_OOM;
+    memmove(keep, url, len + 1);
+    vjo_anki_media_name(keep + len + 1, AUDIO_NAME_CAP, unix_ms, vjo_anki_audio_ext(keep));
+    m->audio_url = keep;
+    m->audio_name = keep + len + 1;
+    return VJO_OK;
+}
+
+const char *vjo_anki_audio_err_text(VjoArena *a, const VjoErr *err)
+{
+    VjoBuf b;
+    vjo_buf_init(&b, a);
+    switch (err->rc) {
+    case VJO_OK: return "no recording";
+    case VJO_E_NET: return "audio source offline";
+    case VJO_E_OOM: return "not enough memory";
+    case VJO_E_TOO_LARGE: return "reply too large";
+    case VJO_E_PARSE: return "not an audio source list";
+    case VJO_E_HTTP: return "bad HTTP reply, or the word is too long";
+    case VJO_E_STATUS: vjo_buf_printf(&b, "HTTP %d", err->http_status); break;
+    case VJO_E_TLS: vjo_buf_printf(&b, "TLS error %d", err->tls_error); break;
+    default: vjo_buf_printf(&b, "unexpected reply %d", err->rc); break;
+    }
+    return vjo_buf_cstr(&b);
 }
 
 const char *vjo_anki_err_text(VjoArena *a, const VjoErr *err)

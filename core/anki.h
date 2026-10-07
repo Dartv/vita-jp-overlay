@@ -39,6 +39,19 @@ typedef struct {
 
 int vjo_anki_note_from_entry(VjoArena *a, const VjoEntryList *l, int entry, VjoAnkiNote *out);
 
+/* What × adds besides the entry's text (NULL / 0 = none): the screenshot,
+ * a JPEG sent in the request, and the word's audio, a URL Anki downloads.
+ * File names from vjo_anki_media_name. */
+typedef struct {
+    const uint8_t *picture;
+    size_t picture_len;
+    const char *picture_name;
+    const char *audio_url, *audio_name;
+} VjoAnkiMedia;
+
+/* "vitajp_<unix ms>.<ext>" */
+void vjo_anki_media_name(char *out, size_t cap, uint64_t unix_ms, const char *ext);
+
 /* ---- requests ---- */
 
 /* A request body: prefix, then `picture` base64-encoded (when picture_len is
@@ -55,13 +68,29 @@ typedef struct {
 /* canAddNotesWithErrorDetail for the first n entries, the word in the word
  * field; NULL when anki_field_word is empty (nothing to check) or on OOM. */
 char *vjo_anki_can_add_request(VjoArena *a, const VjoConfig *cfg, const VjoEntryList *l, int n);
-/* addNote. With picture_name and a picture field, the body ends in a
- * picture (suffix_len != 0) whose JPEG the caller sets in
- * out->picture/picture_len. Returns 0, or -1 on OOM. */
-int vjo_anki_add_request(VjoArena *a, const VjoConfig *cfg, const VjoAnkiNote *n, const char *picture_name,
+/* addNote, with the media the note has a field for. With a picture, the
+ * body ends in it (out->picture/picture_len, base64-encoded when sent).
+ * Returns 0, or -1 on OOM. */
+int vjo_anki_add_request(VjoArena *a, const VjoConfig *cfg, const VjoAnkiNote *n, const VjoAnkiMedia *m,
                          VjoAnkiBody *out);
-/* "vitajp_<unix ms>.jpg" */
-void vjo_anki_picture_name(char *out, size_t cap, uint32_t unix_s, uint32_t ms);
+
+/* ---- word audio ----
+ * anki_audio_url is a Yomitan custom audio source: it lists recordings of
+ * a word, best first. */
+#define VJO_ANKI_AUDIO_MAX_RESPONSE (32u * 1024u)
+
+/* Both anki_audio_url and anki_field_audio are set. */
+int vjo_anki_audio_enabled(const VjoConfig *cfg);
+/* The request path: the URL's path template (see vjo_anki_audio_endpoint)
+ * with {term} and {reading} percent-encoded in ({language}: ja). NULL on
+ * OOM. */
+char *vjo_anki_audio_path(VjoArena *a, const char *path_template, const char *term, const char *reading);
+/* The first http(s) URL of an audioSourceList, or NULL in *url when it
+ * has none. */
+int vjo_anki_audio_parse(VjoArena *a, const char *json, size_t len, const char **url);
+/* The audio file extension of a URL ("opus", ...), "mp3" when it has none
+ * that is known (text-to-speech). */
+const char *vjo_anki_audio_ext(const char *url);
 
 /* ---- calls (one connection each) ----
  * Results: VJO_OK; VJO_E_ANKI_DUPLICATE or VJO_E_ANKI (VjoErr.detail) when
@@ -75,11 +104,21 @@ int vjo_anki_probe(VjoArena *a, const VjoPlatform *p, const char *host, int port
  * reason, such as a deck that does not exist yet). */
 int vjo_anki_check(VjoArena *a, const VjoPlatform *p, const char *host, int port, const char *request,
                    uint8_t *marks, int n, VjoErr *err);
-/* addNote, with the JPEG when jpeg_len and a picture field are set; a
- * missing deck is created, then the note is sent again. */
+/* addNote with the media (see vjo_anki_add_request); a missing deck is
+ * created, then the note is sent again. */
 int vjo_anki_add(VjoArena *a, const VjoPlatform *p, const char *host, int port, const VjoConfig *cfg,
-                 const VjoAnkiNote *n, const uint8_t *jpeg, size_t jpeg_len, const char *picture_name,
-                 VjoErr *err);
+                 const VjoAnkiNote *n, const VjoAnkiMedia *m, VjoErr *err);
+
+/* Asks the audio source (anki_audio_url) for the word: its best recording
+ * in m->audio_url and m->audio_name (both NULL when there is none, or on
+ * an error). Only those two strings stay in the arena. The source's
+ * errors are transport ones (VJO_E_NET, VJO_E_TLS, VJO_E_STATUS, ...) or
+ * VJO_E_PARSE (not an audioSourceList, or an invalid anki_audio_url). */
+int vjo_anki_find_audio(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg, const VjoAnkiNote *n,
+                        uint64_t unix_ms, VjoAnkiMedia *m, VjoErr *err);
+/* Why there is no audio, after vjo_anki_find_audio: "no recording" for
+ * VJO_OK, else the error ("HTTP 401", ...). */
+const char *vjo_anki_audio_err_text(VjoArena *a, const VjoErr *err);
 
 /* Short user-facing description of a call's result ("" for VJO_OK). */
 const char *vjo_anki_err_text(VjoArena *a, const VjoErr *err);

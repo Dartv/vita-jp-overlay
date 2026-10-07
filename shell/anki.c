@@ -1,6 +1,7 @@
 /* AnkiConnect thread: the duplicate pre-check of each new result, × adds
- * (with a screenshot of the whole game frame), and finding Anki on the
- * network for anki_host = auto. Nothing here runs while anki_host is empty.
+ * (with a screenshot of the whole game frame and the word's audio), and
+ * finding Anki on the network for anki_host = auto. Nothing here runs
+ * while anki_host is empty.
  *
  * Its memory is a memblock allocated when work arrives and freed when the
  * mailbox is empty. The result shown in the overlay is only read under the
@@ -295,34 +296,52 @@ static void do_check(unsigned seq)
 
 typedef struct {
     const VjoAnkiNote *note;
-    const uint8_t *jpeg;
-    size_t jpeg_len;
-    const char *name;
+    const VjoAnkiMedia *media;
 } AddOp;
 
 static int op_add(const char *host, int port, void *ud, VjoErr *err)
 {
     AddOp *o = (AddOp *)ud;
-    return vjo_anki_add(&arena, &plat, host, port, &acfg, o->note, o->jpeg, o->jpeg_len, o->name, err);
+    return vjo_anki_add(&arena, &plat, host, port, &acfg, o->note, o->media, err);
 }
 
-static void picture_name(char *out, size_t cap)
+static uint64_t unix_ms(void)
 {
     SceRtcTick t;
-    uint64_t ms = 0;
-    if (sceRtcGetCurrentTick(&t) >= 0) /* microseconds since 0001-01-01 UTC */
-        ms = t.tick / 1000ull - 62135596800000ull;
-    vjo_anki_picture_name(out, cap, (uint32_t)(ms / 1000ull), (uint32_t)(ms % 1000ull));
+    if (sceRtcGetCurrentTick(&t) < 0)
+        return 0;
+    return t.tick / 1000ull - 62135596800000ull; /* microseconds since 0001-01-01 UTC */
+}
+
+/* The game's frame when × was pressed, into m. */
+static void take_screenshot(VjoAnkiMedia *m, char *name, size_t cap)
+{
+    VjoState st;
+    VjoBuf jb;
+    int64_t t0 = now_us();
+    int rc;
+    vjo_buf_init(&jb, &arena);
+    rc = vjo_capture_jpeg(&arena, VJO_CAPTURE_FULL, PICTURE_QUALITY, &jb, &st);
+    if (rc != VJO_OK) {
+        vjo_log("anki: screenshot failed %d: adding without it", rc);
+        return;
+    }
+    vjo_anki_media_name(name, cap, unix_ms(), "jpg");
+    m->picture = jb.data;
+    m->picture_len = jb.len;
+    m->picture_name = name;
+    vjo_log("anki: screenshot %ux%u -> %u bytes in %d ms", st.width, st.height, (unsigned)jb.len,
+            (int)((now_us() - t0) / 1000));
 }
 
 static void do_add(unsigned seq, int entry)
 {
     VjoAnkiNote note;
-    AddOp o;
-    VjoErr err;
-    VjoBuf jb;
-    char name[40];
-    int ok = 0, marked = 0, rc;
+    VjoAnkiMedia media;
+    AddOp o = {&note, &media};
+    VjoErr err, audio_err;
+    char picture_name[40], msg[sizeof(g_view.anki_status)];
+    int ok = 0, marked = 0, rc, want_picture, want_audio;
     int64_t t0 = now_us();
 
     vjo_view_lock();
@@ -337,35 +356,38 @@ static void do_add(unsigned seq, int entry)
         return; /* the ✓ already says so */
     publish(seq, "Adding…", VJO_ANKI_STATUS_DIM, -1);
 
-    /* The screenshot first: the game's frame when × was pressed. */
-    sceClibMemset(&o, 0, sizeof(o));
-    o.note = &note;
-    if (acfg.anki_field[VJO_ANKI_PICTURE][0]) {
-        VjoState st;
-        int64_t tc = now_us();
-        vjo_buf_init(&jb, &arena);
-        rc = vjo_capture_jpeg(&arena, VJO_CAPTURE_FULL, PICTURE_QUALITY, &jb, &st);
-        if (rc == VJO_OK) {
-            o.jpeg = jb.data;
-            o.jpeg_len = jb.len;
-            picture_name(name, sizeof(name));
-            o.name = name;
-            vjo_log("anki: screenshot %ux%u -> %u bytes in %d ms", st.width, st.height, (unsigned)jb.len,
-                    (int)((now_us() - tc) / 1000));
-        } else {
-            vjo_log("anki: screenshot failed %d: adding without it", rc);
-        }
+    sceClibMemset(&media, 0, sizeof(media));
+    want_picture = acfg.anki_field[VJO_ANKI_PICTURE][0] != '\0';
+    want_audio = vjo_anki_audio_enabled(&acfg);
+    if (want_picture) /* first: the frame of the × press */
+        take_screenshot(&media, picture_name, sizeof(picture_name));
+    if (want_audio) {
+        int64_t ta = now_us();
+        vjo_anki_find_audio(&arena, &plat, &acfg, &note, unix_ms(), &media, &audio_err);
+        vjo_log("anki: audio %s: %s (rc=%d) in %d ms", note.spelling,
+                media.audio_url ? media.audio_url : vjo_anki_audio_err_text(&arena, &audio_err), audio_err.rc,
+                (int)((now_us() - ta) / 1000));
     }
     rc = with_anki(1, op_add, &o, &err);
     vjo_log("anki: add %s rc=%d %s in %d ms", note.spelling, rc, err.detail ? err.detail : "",
             (int)((now_us() - t0) / 1000));
-    if (rc == VJO_OK || rc == VJO_E_ANKI_DUPLICATE) {
-        /* The ✓ is the confirmation; only a missing screenshot is worth a line. */
-        int missing = rc == VJO_OK && acfg.anki_field[VJO_ANKI_PICTURE][0] && !o.jpeg_len;
-        publish(seq, missing ? "Added without a screenshot (the capture failed)" : "", VJO_ANKI_STATUS_DIM, entry);
-    } else {
+    if (rc != VJO_OK && rc != VJO_E_ANKI_DUPLICATE) {
         publish_error(seq, &err);
+        return;
     }
+    /* The ✓ is the confirmation; only something missing is worth a line. */
+    msg[0] = '\0';
+    if (rc == VJO_OK) {
+        int no_picture = want_picture && !media.picture_len, no_audio = want_audio && !media.audio_url;
+        const char *why = no_audio ? vjo_anki_audio_err_text(&arena, &audio_err) : "";
+        if (no_picture && no_audio)
+            sceClibSnprintf(msg, sizeof(msg), "Added without a screenshot or audio (%s)", why);
+        else if (no_picture)
+            sceClibSnprintf(msg, sizeof(msg), "Added without a screenshot (the capture failed)");
+        else if (no_audio)
+            sceClibSnprintf(msg, sizeof(msg), "Added without audio (%s)", why);
+    }
+    publish(seq, msg, VJO_ANKI_STATUS_DIM, entry);
 }
 
 /* ---------------- thread ---------------- */
@@ -429,7 +451,7 @@ int vjo_anki_start(void)
         return -1;
     }
     running = 1;
-    thread = sceKernelCreateThread("VjoAnki", anki_main, 0x10000100, 0x8000, 0, 0, NULL);
+    thread = sceKernelCreateThread("VjoAnki", anki_main, 0x10000100, 0x10000, 0, 0, NULL); /* TLS, like VjoNet */
     if (thread < 0) {
         vjo_anki_stop();
         return -1;

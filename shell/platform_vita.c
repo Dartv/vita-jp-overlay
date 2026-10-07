@@ -26,13 +26,18 @@ static int sock_recv(void *ctx, void *p, size_t n)
     return r >= 0 ? r : -1;
 }
 
-static int resolve(const char *host, SceNetInAddr *addr)
+/* DNS: 5 s per try, 2 retries; within timeout_us (one try) when it is set. */
+static int resolve(const char *host, SceNetInAddr *addr, int timeout_us)
 {
-    int rid, ret;
+    int rid, ret, wait = 5 * 1000 * 1000, retries = 2;
+    if (timeout_us > 0) {
+        wait = timeout_us < wait ? timeout_us : wait;
+        retries = 0;
+    }
     rid = sceNetResolverCreate("VjoResolver", NULL, 0);
     if (rid < 0)
         return rid;
-    ret = sceNetResolverStartNtoa(rid, host, addr, 5 * 1000 * 1000, 2, 0);
+    ret = sceNetResolverStartNtoa(rid, host, addr, wait, retries, 0);
     sceNetResolverDestroy(rid);
     return ret;
 }
@@ -83,11 +88,11 @@ static int connect_timed(int fd, const SceNetSockaddrIn *sin, int timeout_us)
     return ret > 0 ? 0 : ret;
 }
 
-static int vita_connect(void *ud, const char *host, int port, int timeout_us, VjoConn *out)
+static int vita_connect(void *ud, const char *host, int port, int timeout_us, int io_timeout_us, VjoConn *out)
 {
     SceNetSockaddrIn sin;
     SceNetInAddr addr;
-    int state = 0, fd, ret, timeout = NET_TIMEOUT_US;
+    int state = 0, fd, ret, timeout = io_timeout_us > 0 ? io_timeout_us : NET_TIMEOUT_US;
     (void)ud;
 
     if (sceNetCtlInetGetState(&state) < 0 || state != SCE_NETCTL_STATE_CONNECTED) {
@@ -95,7 +100,7 @@ static int vita_connect(void *ud, const char *host, int port, int timeout_us, Vj
         return VJO_E_NET;
     }
     /* An IP address (Anki on the LAN) needs no DNS. */
-    if (sceNetInetPton(SCE_NET_AF_INET, host, &addr) != 1 && (ret = resolve(host, &addr)) < 0) {
+    if (sceNetInetPton(SCE_NET_AF_INET, host, &addr) != 1 && (ret = resolve(host, &addr, timeout_us)) < 0) {
         vjo_log("net: resolve %s failed 0x%08X", host, ret);
         return VJO_E_NET;
     }

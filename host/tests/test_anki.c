@@ -1,5 +1,5 @@
 /* Anki: base64, note fields, AnkiConnect requests and replies (over a fake
- * network), the anki_* settings. */
+ * network), word audio, the anki_* settings. */
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -90,7 +90,7 @@ static void test_anki_fields(void)
 
     {
         char name[40];
-        vjo_anki_picture_name(name, sizeof(name), 1791158400u, 7);
+        vjo_anki_media_name(name, sizeof(name), 1791158400007ull, "jpg");
         TEST_CHECK(!strcmp(name, "vitajp_1791158400007.jpg"));
     }
     {
@@ -129,6 +129,7 @@ static void test_anki_requests(void)
     VjoConfig cfg;
     VjoEntryList l;
     VjoAnkiNote n;
+    VjoAnkiMedia m = {(const uint8_t *)"jpeg", 4, "vitajp_1.jpg", NULL, NULL};
     VjoAnkiBody b;
     char *s;
     setup();
@@ -148,7 +149,7 @@ static void test_anki_requests(void)
 
     TEST_ASSERT(vjo_anki_note_from_entry(&A, &l, 0, &n) == 0);
     TEST_CHECK(vjo_anki_note_from_entry(&A, &l, 3, &n) < 0);
-    TEST_ASSERT(vjo_anki_add_request(&A, &cfg, &n, "vitajp_1.jpg", &b) == 0);
+    TEST_ASSERT(vjo_anki_add_request(&A, &cfg, &n, &m, &b) == 0);
     TEST_CHECK(!strcmp(b.prefix,
                        "{\"action\":\"addNote\",\"version\":6,\"params\":{\"note\":{" TARGET ",\"fields\":{"
                        "\"Expression\":\"猫\",\"ExpressionReading\":\"ねこ\",\"ExpressionFurigana\":\"猫[ねこ]\","
@@ -158,6 +159,20 @@ static void test_anki_requests(void)
                        "\"picture\":[{\"filename\":\"vitajp_1.jpg\",\"fields\":[\"Picture\"],\"data\":\""));
     TEST_MSG("%s", b.prefix);
     TEST_CHECK(b.prefix_len == strlen(b.prefix) && !strcmp(b.suffix, "\"}]}}}") && b.suffix_len == 6);
+    TEST_CHECK(b.picture == m.picture && b.picture_len == 4);
+
+    /* the word's audio, for Anki to download, before the picture */
+    m.audio_url = "https://example.com/a \"b\".opus";
+    m.audio_name = "vitajp_1.opus";
+    TEST_ASSERT(vjo_anki_add_request(&A, &cfg, &n, &m, &b) == 0);
+    TEST_CHECK(strstr(b.prefix, "\"FreqSort\":\"1500\"},") && !strstr(b.prefix, "ExpressionAudio\":\""));
+    TEST_CHECK(strstr(b.prefix, OPTS ",\"audio\":[{\"filename\":\"vitajp_1.opus\",\"fields\":[\"ExpressionAudio\"],"
+                                "\"url\":\"https://example.com/a \\\"b\\\".opus\"}],"
+                                "\"picture\":[{\"filename\":\"vitajp_1.jpg\"") != NULL);
+    TEST_MSG("%s", b.prefix);
+    cfg.anki_field[VJO_ANKI_AUDIO][0] = '\0'; /* no audio field: no audio */
+    TEST_ASSERT(vjo_anki_add_request(&A, &cfg, &n, &m, &b) == 0);
+    TEST_CHECK(!strstr(b.prefix, "\"audio\""));
 
     /* blank fields are skipped; no picture field: no picture; no rank: no frequency */
     cfg.anki_field[VJO_ANKI_READING][0] = '\0';
@@ -167,11 +182,11 @@ static void test_anki_requests(void)
     cfg.anki_field[VJO_ANKI_PICTURE][0] = '\0';
     cfg.anki_tags[0] = '\0';
     TEST_ASSERT(vjo_anki_note_from_entry(&A, &l, 2, &n) == 0);
-    TEST_ASSERT(vjo_anki_add_request(&A, &cfg, &n, "vitajp_1.jpg", &b) == 0);
+    TEST_ASSERT(vjo_anki_add_request(&A, &cfg, &n, &m, &b) == 0);
     TEST_CHECK(!strcmp(b.prefix, "{\"action\":\"addNote\",\"version\":6,\"params\":{\"note\":{" TARGET
                                  ",\"fields\":{\"Expression\":\"好き\"},\"tags\":[]," OPTS "}}}"));
     TEST_MSG("%s", b.prefix);
-    TEST_CHECK(b.suffix_len == 0);
+    TEST_CHECK(b.suffix_len == 0 && b.picture_len == 0);
     cfg.anki_field[VJO_ANKI_WORD][0] = '\0';
     TEST_CHECK(vjo_anki_can_add_request(&A, &cfg, &l, 3) == NULL);
 }
@@ -185,10 +200,10 @@ typedef struct {
     int n_responses, next;
     VjoMemConn conn;
     char sent[4][8192];
-    int port, timeout_us;
+    int port, timeout_us, io_timeout_us;
 } FakeNet;
 
-static int fake_connect(void *ud, const char *host, int port, int timeout_us, VjoConn *out)
+static int fake_connect(void *ud, const char *host, int port, int timeout_us, int io_timeout_us, VjoConn *out)
 {
     FakeNet *f = (FakeNet *)ud;
     int k = f->next;
@@ -198,6 +213,7 @@ static int fake_connect(void *ud, const char *host, int port, int timeout_us, Vj
     f->next++;
     f->port = port;
     f->timeout_us = timeout_us;
+    f->io_timeout_us = io_timeout_us;
     memset(&f->conn, 0, sizeof(f->conn));
     f->conn.in = f->responses[k];
     f->conn.len = strlen(f->responses[k]);
@@ -252,7 +268,7 @@ static void test_anki_probe(void)
     fake_net(&f, &p, 1, ok("{\"result\": 6, \"error\": null}"));
     TEST_CHECK(vjo_anki_probe(&A, &p, "192.168.1.23", 8765, &err) == VJO_OK);
     TEST_CHECK(f.port == 8765 && f.timeout_us > 0);
-    TEST_CHECK(!strcmp(f.sent[0], "POST / HTTP/1.1\r\nHost: 192.168.1.23\r\nContent-Type: application/json\r\n"
+    TEST_CHECK(!strcmp(f.sent[0], "POST / HTTP/1.1\r\nHost: 192.168.1.23:8765\r\nContent-Type: application/json\r\n"
                                   "Content-Length: 32\r\nConnection: close\r\n\r\n"
                                   "{\"action\":\"version\",\"version\":6}"));
     TEST_MSG("%s", f.sent[0]);
@@ -307,6 +323,7 @@ static void test_anki_add(void)
     VjoEntryList l;
     VjoAnkiNote n;
     VjoErr err;
+    VjoAnkiMedia m = {0}, none = {0};
     uint8_t jpeg[100];
     char b64[200] = {0};
     const char *body;
@@ -321,7 +338,10 @@ static void test_anki_add(void)
 
     /* one addNote, the picture streamed as base64 with an exact length */
     fake_net(&f, &p, 1, ok("{\"result\": 1700000000001, \"error\": null}"));
-    TEST_CHECK(vjo_anki_add(&A, &p, "h", 8765, &cfg, &n, jpeg, sizeof(jpeg), "vitajp_1.jpg", &err) == VJO_OK);
+    m.picture = jpeg;
+    m.picture_len = sizeof(jpeg);
+    m.picture_name = "vitajp_1.jpg";
+    TEST_CHECK(vjo_anki_add(&A, &p, "h", 8765, &cfg, &n, &m, &err) == VJO_OK);
     TEST_CHECK(f.next == 1);
     body = strstr(f.sent[0], "\r\n\r\n");
     TEST_ASSERT(body != NULL);
@@ -341,7 +361,7 @@ static void test_anki_add(void)
     /* a new deck: created, then the note again */
     fake_net(&f, &p, 3, ok("{\"result\": null, \"error\": \"deck was not found: Default\"}"),
              ok("{\"result\": 1, \"error\": null}"), ok("{\"result\": 2, \"error\": null}"));
-    TEST_CHECK(vjo_anki_add(&A, &p, "h", 8765, &cfg, &n, NULL, 0, NULL, &err) == VJO_OK);
+    TEST_CHECK(vjo_anki_add(&A, &p, "h", 8765, &cfg, &n, &none, &err) == VJO_OK);
     TEST_CHECK(f.next == 3 && strstr(f.sent[2], "\"action\":\"addNote\""));
     TEST_CHECK(strstr(f.sent[1], "{\"action\":\"createDeck\",\"version\":6,\"params\":{\"deck\":\"Default\"}}"));
     TEST_CHECK(!strstr(f.sent[2], "\"picture\"")); /* no JPEG: no picture */
@@ -350,7 +370,7 @@ static void test_anki_add(void)
 #define REFUSED(error, rc, text)                                                                               \
     do {                                                                                                       \
         fake_net(&f, &p, 1, ok("{\"result\": null, \"error\": \"" error "\"}"));                             \
-        TEST_CHECK(vjo_anki_add(&A, &p, "h", 8765, &cfg, &n, NULL, 0, NULL, &err) == (rc));                   \
+        TEST_CHECK(vjo_anki_add(&A, &p, "h", 8765, &cfg, &n, &none, &err) == (rc));                   \
         TEST_CHECK(!strcmp(vjo_anki_err_text(&A, &err), text));                                                \
         TEST_MSG("%s -> %s", error, vjo_anki_err_text(&A, &err));                                              \
     } while (0)
@@ -365,7 +385,7 @@ static void test_anki_add(void)
 #undef REFUSED
 
     fake_net(&f, &p, 1, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
-    TEST_CHECK(vjo_anki_add(&A, &p, "h", 8765, &cfg, &n, NULL, 0, NULL, &err) == VJO_E_STATUS);
+    TEST_CHECK(vjo_anki_add(&A, &p, "h", 8765, &cfg, &n, &none, &err) == VJO_E_STATUS);
     TEST_CHECK(!strcmp(vjo_anki_err_text(&A, &err), "Anki refused the request (HTTP 403)"));
     err.rc = VJO_E_NOT_FOUND;
     TEST_CHECK(!strcmp(vjo_anki_err_text(&A, &err), "Anki not found on the network"));
@@ -377,6 +397,156 @@ static void test_anki_add(void)
                vjo_anki_host_stale(VJO_E_HTTP) && vjo_anki_host_stale(VJO_E_STATUS));
     TEST_CHECK(!vjo_anki_host_stale(VJO_OK) && !vjo_anki_host_stale(VJO_E_ANKI) &&
                !vjo_anki_host_stale(VJO_E_ANKI_DUPLICATE) && !vjo_anki_host_stale(VJO_E_OOM));
+}
+
+/* ---------- word audio ---------- */
+
+#define AUDIO_LIST                                                                                            \
+    "{\"type\":\"audioSourceList\",\"audioSources\":["                                                           \
+    "{\"name\":\"NHK16 ネコ＼ [1]\",\"url\":\"https://raw.example.com/x/audio/1.opus\"},"                         \
+    "{\"name\":\"TTS 1\",\"url\":\"https://audio.example.workers.dev/tts/a+b/c=\"}]}"
+
+static void test_anki_audio_parts(void)
+{
+    const char *url;
+    VjoConfig cfg;
+    setup();
+
+    vjo_config_defaults(&cfg);
+    TEST_CHECK(!vjo_anki_audio_enabled(&cfg)); /* no URL by default */
+    snprintf(cfg.anki_audio_url, sizeof(cfg.anki_audio_url), "https://h/?t={term}");
+    TEST_CHECK(vjo_anki_audio_enabled(&cfg));
+    cfg.anki_field[VJO_ANKI_AUDIO][0] = '\0';
+    TEST_CHECK(!vjo_anki_audio_enabled(&cfg));
+
+    /* the template with {term} and {reading} percent-encoded (no reading: the term) */
+    TEST_CHECK(!strcmp(vjo_anki_audio_path(&A, "/audio/list?term={term}&reading={reading}&apiKey=k", "猫", "ねこ"),
+                       "/audio/list?term=%E7%8C%AB&reading=%E3%81%AD%E3%81%93&apiKey=k"));
+    TEST_CHECK(!strcmp(vjo_anki_audio_path(&A, "?t={term}&r={reading}&l={language}&x={other}", "a&b c", ""),
+                       "/?t=a%26b%20c&r=a%26b%20c&l=ja&x={other}"));
+    TEST_CHECK(!strcmp(vjo_anki_audio_path(&A, "?t={term}&r={reading}", "a", NULL), "/?t=a&r=a"));
+    TEST_CHECK(!strcmp(vjo_anki_audio_path(&A, "", "a", "b"), "/"));
+
+    /* the first http(s) URL; entries without one are skipped */
+    TEST_CHECK(vjo_anki_audio_parse(&A, AUDIO_LIST, strlen(AUDIO_LIST), &url) == VJO_OK && url &&
+               !strcmp(url, "https://raw.example.com/x/audio/1.opus"));
+#define PARSE(json, rc) (vjo_anki_audio_parse(&A, json, strlen(json), &url) == (rc))
+    TEST_CHECK(PARSE("{\"audioSources\":[{\"name\":\"x\"},\"y\",3,{\"url\":\"data:audio/mp3;base64,AA\"},"
+                     "{\"url\":7},{\"url\":\"http://h/2.ogg\"}]}",
+                     VJO_OK) &&
+               url && !strcmp(url, "http://h/2.ogg"));
+    TEST_CHECK(PARSE("{\"type\":\"audioSourceList\",\"audioSources\":[]}", VJO_OK) && !url);
+    TEST_CHECK(PARSE("{\"audioSources\":[{\"url\":\"file:///etc/passwd\"}]}", VJO_OK) && !url);
+    TEST_CHECK(PARSE("{\"error\":\"x\"}", VJO_E_PARSE) && !url);
+    TEST_CHECK(PARSE("{\"audioSources\":{}}", VJO_E_PARSE) && PARSE("[]", VJO_E_PARSE) &&
+               PARSE("<html>", VJO_E_PARSE));
+#undef PARSE
+
+    /* a known audio extension of the path, else mp3 (text-to-speech) */
+#define EXT(u, e)                                                                                             \
+    do {                                                                                                      \
+        TEST_CHECK(!strcmp(vjo_anki_audio_ext(u), e));                                                        \
+        TEST_MSG("%s -> %s", u, vjo_anki_audio_ext(u));                                                       \
+    } while (0)
+    EXT("https://h/x/audio/1.opus", "opus");
+    EXT("https://h/a.b/1.OGG?x=y.wav#z.m4a", "ogg");
+    EXT("https://audio.example.workers.dev/tts/a+b/c=", "mp3");
+    EXT("https://audio.example.com", "mp3");     /* the host's dot */
+    EXT("https://audio.example.com?f=a.opus", "mp3"); /* the query's */
+    EXT("https://h/tts.php?t=x", "mp3");
+    EXT("https://h/x.opus/1", "mp3");
+    EXT("https://h/1.opus2", "mp3");
+    EXT("h/1.wav", "wav");
+#undef EXT
+}
+
+/* A response bigger than ok()'s buffers. */
+static const char *big_response(size_t body_len)
+{
+    static char buf[64 * 1024];
+    int n = snprintf(buf, sizeof(buf), "HTTP/1.1 200 OK\r\nContent-Length: %lu\r\n\r\n", (unsigned long)body_len);
+    TEST_ASSERT(n > 0 && (size_t)n + body_len < sizeof(buf));
+    memset(buf + n, ' ', body_len);
+    buf[n + body_len] = '\0';
+    return buf;
+}
+
+static void test_anki_find_audio(void)
+{
+    FakeNet f;
+    VjoPlatform p;
+    VjoConfig cfg;
+    VjoEntryList l;
+    VjoAnkiNote n;
+    VjoAnkiMedia m;
+    VjoErr err;
+    size_t mark;
+    char long_term[200 * 3 + 1];
+    const uint64_t now = 1791158400007ull;
+    setup();
+    vjo_config_defaults(&cfg);
+    anki_list(&l);
+    TEST_ASSERT(vjo_anki_note_from_entry(&A, &l, 0, &n) == 0);
+#define FIND() vjo_anki_find_audio(&A, &p, &cfg, &n, now, &m, &err)
+#define WORKER "https://my-audio.example.workers.dev/audio/list?term={term}&reading={reading}&apiKey=k"
+    snprintf(cfg.anki_audio_url, sizeof(cfg.anki_audio_url), WORKER);
+
+    /* a GET to the URL's host (HTTPS: 443, short timeouts); only the URL
+     * and its file name stay in the arena */
+    fake_net(&f, &p, 1, ok(AUDIO_LIST));
+    p.plain_http = 1;
+    mark = vjo_arena_mark(&A);
+    TEST_CHECK(FIND() == VJO_OK && m.audio_url && !strcmp(m.audio_url, "https://raw.example.com/x/audio/1.opus") &&
+               !strcmp(m.audio_name, "vitajp_1791158400007.opus"));
+    TEST_CHECK(vjo_arena_mark(&A) - mark < 128);
+    TEST_CHECK(f.port == 443 && f.timeout_us > 0 && f.io_timeout_us > 0);
+    TEST_CHECK(!strcmp(f.sent[0], "GET /audio/list?term=%E7%8C%AB&reading=%E3%81%AD%E3%81%93&apiKey=k HTTP/1.1\r\n"
+                                  "Host: my-audio.example.workers.dev\r\nConnection: close\r\n\r\n"));
+    TEST_MSG("%s", f.sent[0]);
+
+    /* plain HTTP on another port: the port in Host; a chunked reply */
+    snprintf(cfg.anki_audio_url, sizeof(cfg.anki_audio_url), "http://192.168.1.5:5050?term={term}");
+    fake_net(&f, &p, 1,
+             "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+             "10\r\n{\"audioSources\":\r\n1b\r\n[{\"url\":\"http://h/a.mp3\"}]}\r\n0\r\n\r\n");
+    TEST_CHECK(FIND() == VJO_OK && m.audio_url && !strcmp(m.audio_url, "http://h/a.mp3") && f.port == 5050);
+    TEST_CHECK(!strcmp(f.sent[0], "GET /?term=%E7%8C%AB HTTP/1.1\r\nHost: 192.168.1.5:5050\r\n"
+                                  "Connection: close\r\n\r\n"));
+    TEST_MSG("%s", f.sent[0]);
+
+    /* no recording; then errors, with nothing left on the note or in the arena */
+    snprintf(cfg.anki_audio_url, sizeof(cfg.anki_audio_url), WORKER);
+    fake_net(&f, &p, 4, ok("{\"audioSources\":[]}"), "HTTP/1.1 401 No\r\nContent-Length: 0\r\n\r\n",
+             ok("<html>"), NULL);
+    p.plain_http = 1;
+    mark = vjo_arena_mark(&A);
+    TEST_CHECK(FIND() == VJO_OK && !m.audio_url && !m.audio_name);
+    TEST_CHECK(!strcmp(vjo_anki_audio_err_text(&A, &err), "no recording"));
+    TEST_CHECK(FIND() == VJO_E_STATUS && !m.audio_url && !strcmp(vjo_anki_audio_err_text(&A, &err), "HTTP 401"));
+    TEST_CHECK(FIND() == VJO_E_PARSE && !m.audio_url &&
+               !strcmp(vjo_anki_audio_err_text(&A, &err), "not an audio source list"));
+    TEST_CHECK(FIND() == VJO_E_NET && !m.audio_url &&
+               !strcmp(vjo_anki_audio_err_text(&A, &err), "audio source offline"));
+    vjo_arena_release(&A, mark); /* (the error texts) */
+
+    /* a reply over the limit; a term too long for the request line */
+    fake_net(&f, &p, 1, big_response(VJO_ANKI_AUDIO_MAX_RESPONSE + 1));
+    p.plain_http = 1;
+    TEST_CHECK(FIND() == VJO_E_TOO_LARGE && !m.audio_url &&
+               !strcmp(vjo_anki_audio_err_text(&A, &err), "reply too large"));
+    for (int i = 0; i < 200; i++)
+        memcpy(long_term + i * 3, "猫", 3);
+    long_term[200 * 3] = '\0';
+    n.spelling = long_term;
+    fake_net(&f, &p, 1, ok(AUDIO_LIST));
+    p.plain_http = 1;
+    TEST_CHECK(FIND() == VJO_E_HTTP && !m.audio_url);
+
+    /* an invalid URL (validated at load, so only by hand) */
+    snprintf(cfg.anki_audio_url, sizeof(cfg.anki_audio_url), "ftp://x/{term}");
+    TEST_CHECK(FIND() == VJO_E_PARSE && !m.audio_url);
+#undef WORKER
+#undef FIND
 }
 
 /* ---------- settings ---------- */
@@ -393,24 +563,100 @@ static void test_anki_config(void)
                       "anki_note_type = Lapis;v2\n"
                       "anki_tags = a b\n"
                       "anki_field_picture =\n"
+                      "anki_field_audio =\n"
+                      "anki_audio_url = https://w.dev/audio/list?term={term}&reading={reading}&apiKey=a;b\n"
                       "Anki_Field_Word = Word\n";
     vjo_config_defaults(&c);
     TEST_CHECK(!c.anki_host[0] && !strcmp(c.anki_deck, "Default") && !strcmp(c.anki_note_type, "Lapis") &&
                !strcmp(c.anki_tags, "vita-jp-overlay"));
     TEST_CHECK(!strcmp(c.anki_field[VJO_ANKI_WORD], "Expression") &&
-               !strcmp(c.anki_field[VJO_ANKI_FREQUENCY], "FreqSort"));
+               !strcmp(c.anki_field[VJO_ANKI_FREQUENCY], "FreqSort") &&
+               !strcmp(c.anki_field[VJO_ANKI_AUDIO], "ExpressionAudio") && !c.anki_audio_url[0]);
     vjo_config_parse(&c, ini, strlen(ini));
     TEST_CHECK(c.n_warnings == 0);
     TEST_CHECK(!strcmp(c.anki_host, "auto"));
     TEST_CHECK(!strcmp(c.anki_deck, "Mining #1 ; main"));
     TEST_CHECK(!strcmp(c.anki_note_type, "Lapis;v2"));
     TEST_CHECK(!strcmp(c.anki_tags, "a b"));
-    TEST_CHECK(c.anki_field[VJO_ANKI_PICTURE][0] == 0 && !strcmp(c.anki_field[VJO_ANKI_WORD], "Word"));
+    TEST_CHECK(c.anki_field[VJO_ANKI_PICTURE][0] == 0 && c.anki_field[VJO_ANKI_AUDIO][0] == 0 &&
+               !strcmp(c.anki_field[VJO_ANKI_WORD], "Word"));
+    TEST_CHECK(!strcmp(c.anki_audio_url, "https://w.dev/audio/list?term={term}&reading={reading}&apiKey=a;b"));
+    TEST_MSG("%s", c.anki_audio_url);
 
     ini = "anki_host = 192.168.1.5:99999\nanki_deck =\nanki_host2 = x\n";
     vjo_config_defaults(&c);
     vjo_config_parse(&c, ini, strlen(ini));
     TEST_CHECK(c.n_warnings == 3 && !c.anki_host[0] && !strcmp(c.anki_deck, "Default"));
+    TEST_CHECK(!strcmp(c.warnings[0], "anki_host: invalid value '192.168.1.5:99999' (empty, auto, or IP[:port])"));
+    TEST_MSG("%s", c.warnings[0]);
+    /* anki_audio_url: one warning for each invalid value, and no audio */
+    {
+        static const char *const bad[] = {
+            "ftp://x/{term}", "https://", "https:///?t={term}", "https://h:0/{term}", "https://h/{term} b",
+            "https://h/{term}#x", "https://h/?t=%s", "https://h/{term}\x7f", "https://h/{term}\xe7\x8c\xab",
+            "https://h_h/{term}", "http//h/{term}",
+        };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            char line[256];
+            snprintf(line, sizeof(line), "anki_audio_url = %s\n", bad[i]);
+            vjo_config_defaults(&c);
+            vjo_config_parse(&c, line, strlen(line));
+            TEST_CHECK(c.n_warnings == 1 && !c.anki_audio_url[0]);
+            TEST_MSG("%s", bad[i]);
+        }
+        TEST_CHECK(strstr(c.warnings[0], "anki_audio_url: invalid value") == c.warnings[0]);
+        TEST_MSG("%s", c.warnings[0]);
+    }
+    /* a host of up to 127 bytes, a value of up to 255 */
+    {
+        char line[600], fill[300];
+        memset(fill, 'h', sizeof(fill));
+        fill[127] = '\0';
+        snprintf(line, sizeof(line), "anki_audio_url = https://%s/?t={term}\n", fill);
+        vjo_config_defaults(&c);
+        vjo_config_parse(&c, line, strlen(line));
+        TEST_CHECK(c.n_warnings == 0 && strlen(c.anki_audio_url) == strlen("https:///?t={term}") + 127);
+        fill[127] = 'h';
+        fill[128] = '\0';
+        snprintf(line, sizeof(line), "anki_audio_url = https://%s/?t={term}\n", fill);
+        vjo_config_defaults(&c);
+        vjo_config_parse(&c, line, strlen(line));
+        TEST_CHECK(c.n_warnings == 1 && !c.anki_audio_url[0]);
+
+        memset(fill, 'k', sizeof(fill));
+        fill[255 - strlen("https://h/?t={term}&k=")] = '\0';
+        snprintf(line, sizeof(line), "anki_audio_url = https://h/?t={term}&k=%s\n", fill);
+        vjo_config_defaults(&c);
+        vjo_config_parse(&c, line, strlen(line));
+        TEST_CHECK(c.n_warnings == 0 && strlen(c.anki_audio_url) == 255);
+        /* longer: a warning, not a URL cut short (and so a wrong API key) */
+        snprintf(line, sizeof(line), "anki_audio_url = https://h/?t={term}&k=%sk\n", fill);
+        vjo_config_defaults(&c);
+        vjo_config_parse(&c, line, strlen(line));
+        TEST_CHECK(c.n_warnings == 1 && !c.anki_audio_url[0] && strstr(c.warnings[0], "value too long"));
+        /* a long inline comment after a short value: only the comment is cut */
+        {
+            static char comment[2000];
+            memset(comment, 'x', sizeof(comment));
+            memcpy(comment, "anki_host = auto ; ", 19);
+            comment[sizeof(comment) - 2] = '\n';
+            comment[sizeof(comment) - 1] = '\0';
+            vjo_config_defaults(&c);
+            vjo_config_parse(&c, comment, strlen(comment));
+            TEST_CHECK(c.n_warnings == 0 && !strcmp(c.anki_host, "auto"));
+        }
+        /* a line longer than the line buffer: the same */
+        {
+            static char longline[2000];
+            memset(longline, 'k', sizeof(longline));
+            memcpy(longline, "anki_audio_url = https://h/?t={term}&k=", 39);
+            longline[sizeof(longline) - 2] = '\n';
+            longline[sizeof(longline) - 1] = '\0';
+            vjo_config_defaults(&c);
+            vjo_config_parse(&c, longline, strlen(longline));
+            TEST_CHECK(c.n_warnings == 1 && !c.anki_audio_url[0] && strstr(c.warnings[0], "value too long"));
+        }
+    }
     ini = "anki_host = 192.168.1.5:8766\n";
     vjo_config_defaults(&c);
     vjo_config_parse(&c, ini, strlen(ini));
@@ -437,6 +683,8 @@ TEST_LIST = {
     {"anki_probe", test_anki_probe},
     {"anki_check", test_anki_check},
     {"anki_add", test_anki_add},
+    {"anki_audio_parts", test_anki_audio_parts},
+    {"anki_find_audio", test_anki_find_audio},
     {"anki_config", test_anki_config},
     {NULL, NULL},
 };

@@ -24,6 +24,7 @@ int vjo_http_request(VjoArena *a, const VjoPlatform *p, int port, int use_tls, c
                      size_t max_body, VjoHttpResponse *resp, VjoErr *err)
 {
     size_t mark = vjo_arena_mark(a);
+    VjoHttpRequest r = *req;
     VjoConn raw, *conn;
     VjoTls *tls = NULL;
     void *tbuf = NULL;
@@ -32,6 +33,8 @@ int vjo_http_request(VjoArena *a, const VjoPlatform *p, int port, int use_tls, c
     int rc;
 
     memset(resp, 0, sizeof(*resp));
+    if (port != (use_tls ? 443 : 80))
+        r.host_port = port;
 #ifdef VJO_HOST
     if (p->plain_http)
         use_tls = 0;
@@ -44,7 +47,7 @@ int vjo_http_request(VjoArena *a, const VjoPlatform *p, int port, int use_tls, c
             return err->rc = VJO_E_OOM;
         }
     }
-    rc = p->connect(p->ud, req->host, port, req->connect_timeout_us, &raw);
+    rc = p->connect(p->ud, req->host, port, req->connect_timeout_us, req->io_timeout_us, &raw);
     if (rc) {
         vjo_arena_release(a, mark);
         return err->rc = VJO_E_NET;
@@ -59,7 +62,7 @@ int vjo_http_request(VjoArena *a, const VjoPlatform *p, int port, int use_tls, c
         conn = &tls->conn;
     }
     if (rc == VJO_OK)
-        rc = vjo_http_send(conn, req);
+        rc = vjo_http_send(conn, &r);
     if (rc == VJO_OK)
         rc = vjo_http_recv(a, conn, max_body, resp);
     if (use_tls) {
