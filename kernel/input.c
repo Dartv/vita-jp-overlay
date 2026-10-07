@@ -161,12 +161,69 @@ static void rear_sample(void)
     __sync_lock_release(&rear_busy);
 }
 
+/* Player input for change detection (g.input_us32): a press, a release, a
+ * stick entering or leaving its deadzone, a touch starting, moving or
+ * ending (g.input_edge_us32 too); and held, for HELD_INPUT_US after that
+ * (auto-repeat scrolling), not longer: a button held through a scene must
+ * not keep icons from being masked. Only input the game gets, read in its
+ * own pad and touch calls: none while the overlay blocks it, no trigger
+ * combo or held-over button it never sees. */
+#define HELD_INPUT_US 1500000
+
+typedef struct {
+    uint32_t state;
+    int64_t edge_us;
+} Activity;
+
+static void note_activity(Activity *a, uint32_t state)
+{
+    int64_t now = ksceKernelGetSystemTimeWide();
+    if (g.input_block) {
+        a->state = state; /* the game gets none of it: no edge, now or at the unblock */
+        return;
+    }
+    if (state != a->state) {
+        a->state = state;
+        a->edge_us = now;
+        g.input_edge_us32 = (uint32_t)now;
+    } else if (!state || now - a->edge_us > HELD_INPUT_US) {
+        return;
+    }
+    g.input_us32 = (uint32_t)now; /* one store each: written from any thread */
+}
+
+/* Game threads, unsynchronized: two threads reading at once can tear
+ * edge_us, which at worst shortens or lengthens one hold by HELD_INPUT_US.
+ * The pad's per port: a game may read several, one state each. */
+#define HOLD_PORTS 5 /* pad ports: 0 = the Vita's pad, 1-4 = PS TV controllers */
+static Activity touch_activity, pad_activity[HOLD_PORTS];
+
+#define STICK_DEADZONE 32
+/* SceCtrlData.buttons bits the player presses; the higher ones are status
+ * (SCE_CTRL_INTERCEPTED, HEADPHONE, VOLUP/VOLDOWN, POWER). */
+#define PLAYER_BUTTONS 0xFFFFu
+
+/* Bit 0: pushed one way past the deadzone, bit 1: the other way. */
+static uint32_t stick_dir(uint8_t v)
+{
+    return v < 128 - STICK_DEADZONE ? 1u : v > 128 + STICK_DEADZONE ? 2u : 0u;
+}
+
+/* A touch's state: down, and where, in 128-unit squares (a drag moves). */
+static uint32_t touch_state(const KTouchData *t)
+{
+    if (!t->reportNum)
+        return 0;
+    return 1u | ((uint32_t)t->report[0].x >> 7 & 0x3F) << 1 | ((uint32_t)t->report[0].y >> 7 & 0x3F) << 7;
+}
+
 /* Combo delay state (triggers.h), per pad port: a game may also read empty
  * ports, which must not end a press. Pad calls can come from several game
- * threads: one at a time uses it, the others skip the delay. Reset when the
- * triggers change (g.trigger_gen). */
+ * threads: one at a time uses it, the others skip the delay (so a combo's
+ * first button can reach such a thread for a frame, and count as an input
+ * edge in change detection). Reset when the triggers change
+ * (g.trigger_gen). */
 #define COMBO_DELAY_US 300000 /* covers the gap between a combo's two presses */
-#define HOLD_PORTS 5          /* 0 = the Vita's pad, 1-4 = PS TV controllers */
 
 static TrigHold hold[HOLD_PORTS][TRIG_COUNT];
 static volatile int hold_busy;
@@ -217,6 +274,10 @@ static void filter_ctrl(int port, SceCtrlData *pad_data, int n, int negative)
         } else {
             pos = trig_filter(&c, holds, pos, now) & ~g.suppress_mask;
         }
+        if (i == n - 1 && port >= 0 && port < HOLD_PORTS) /* what the game gets (nothing while blocked) */
+            note_activity(&pad_activity[port], (pos & PLAYER_BUTTONS) | stick_dir(d.lx) << 16 |
+                                                   stick_dir(d.ly) << 18 | stick_dir(d.rx) << 20 |
+                                                   stick_dir(d.ry) << 22);
         d.buttons = negative ? ~pos : pos;
         ksceKernelMemcpyKernelToUser((void *)u, &d, sizeof(d));
     }
@@ -254,9 +315,12 @@ CTRL_HOOK(H_READ_POS_EXT2, read_pos_ext2, 0)
  * rear_peek_thid, and passes. */
 static int filter_touch(KTouchData *p, int ret)
 {
-    if (ret <= 0 || ret > 64 || !g.input_block || g.game_pid <= 0 || !g.game_active)
+    if (ret <= 0 || ret > 64 || g.game_pid <= 0 || !g.game_active)
         return ret;
     if (ksceKernelGetProcessId() != g.game_pid)
+        return ret;
+    note_activity(&touch_activity, touch_state(&p[ret - 1]));
+    if (!g.input_block)
         return ret;
     p[0] = p[ret - 1];
     p[0].reportNum = 0;

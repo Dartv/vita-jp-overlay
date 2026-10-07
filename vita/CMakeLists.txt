@@ -30,6 +30,7 @@ add_executable(VitaJPOverlay_Kernel
   ${ROOT}/kernel/input.c
   ${ROOT}/kernel/lifecycle.c
   ${ROOT}/kernel/foreground.c
+  ${ROOT}/kernel/scene.c
   ${ROOT}/kernel/triggers.c)
 target_compile_options(VitaJPOverlay_Kernel PRIVATE -Wall -Wextra -Wno-unused-parameter -O2 -std=gnu99 -fno-builtin)
 target_link_options(VitaJPOverlay_Kernel PRIVATE -nostdlib -Wl,-q)

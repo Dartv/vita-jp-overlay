@@ -53,7 +53,7 @@ static int fb_read(GameFb *out)
 }
 
 /* A frame of the game, in its context: geometry, the change detection
- * checksum, and a pending capture. One caller at a time (frame_busy, held
+ * signature, and a pending capture. One caller at a time (frame_busy, held
  * for a whole capture copy): the display hook and the static framebuffer
  * sampling may run at once on different threads. */
 static volatile int frame_busy;
@@ -68,10 +68,10 @@ static void on_frame(const GameFb *fb)
     g.fb_h = fb->h;
 
     if (g.game_active && g.capture_state == CAPTURE_IDLE && ++frame_n % VJO_CHECK_EVERY_FRAMES == 0) {
-        uint32_t cs = region_checksum_hook(fb->base, fb->pitch, fb->fmt, fb->w, fb->h);
-        if (cs) {
-            g.hook_checksum = cs;
-            g.hook_checksum_seq++;
+        uint32_t seq = g.hook_sig_seq;
+        if (region_sig_hook(fb->base, fb->pitch, fb->fmt, fb->w, fb->h, &g.hook_sig[(seq + 1) & 1]) == 0) {
+            __sync_synchronize(); /* the signature is written before the bump */
+            g.hook_sig_seq = seq + 1;
         }
     }
 

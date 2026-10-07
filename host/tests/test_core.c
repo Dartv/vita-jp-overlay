@@ -18,6 +18,7 @@
 #include "regions.h"
 #include "render.h"
 #include "replay.h"
+#include "scene.h"
 #include "textfilter.h"
 #include "triggers.h"
 #include "utf.h"
@@ -1014,6 +1015,579 @@ static void test_trigger_filter(void)
     TEST_CHECK(trig_filter(&c, h, 0, t + 64000) == 0);
 }
 
+/* ---- change detection (kernel/scene.c) ---- */
+
+#define FRAME_MAX_W 960
+#define FRAME_MAX_H 544
+static uint32_t frame[FRAME_MAX_W * FRAME_MAX_H];
+static uint32_t frame_w, frame_h;
+
+#define DARK  0xFF202020u
+#define WHITE 0xFFFFFFFFu
+#define GLYPH 24
+#define TICK  133000 /* a signature every 8 frames at 60 fps */
+#define NO_INPUT 0   /* no player input (long before the tests' clock) */
+
+static void frame_new(uint32_t w, uint32_t h)
+{
+    frame_w = w;
+    frame_h = h;
+    for (uint32_t i = 0; i < w * h; i++)
+        frame[i] = DARK;
+}
+
+static void frame_rect(uint32_t x, uint32_t y, uint32_t rw, uint32_t rh, uint32_t color)
+{
+    for (uint32_t r = y; r < y + rh; r++)
+        for (uint32_t c = x; c < x + rw; c++)
+            frame[r * frame_w + c] = color;
+}
+
+/* A made-up glyph: about a third of its pixels inked, by seed. Glyphs of
+ * different seeds have the same ink density, so a line swap keeps each
+ * cell's brightness and only the pixels differ. */
+static void frame_glyph(uint32_t x, uint32_t y, uint32_t seed)
+{
+    uint32_t v = seed * 2654435761u + 1;
+    for (uint32_t r = 0; r < GLYPH; r++)
+        for (uint32_t c = 0; c < GLYPH; c++) {
+            v = v * 1103515245u + 12345u;
+            frame[(y + r) * frame_w + x + c] = (v >> 16) % 3 == 0 ? WHITE : DARK;
+        }
+}
+
+static void frame_text(uint32_t x, uint32_t y, uint32_t seed, int n)
+{
+    for (int i = 0; i < n; i++)
+        frame_glyph(x + (uint32_t)i * GLYPH, y, seed + (uint32_t)i);
+}
+
+static SceneSig frame_sig(void)
+{
+    static SceneAcc acc;
+    SceneSig sig;
+    scene_acc_begin(&acc, &sig, frame_w, frame_h);
+    for (uint32_t y = 0; y < frame_h; y++)
+        scene_acc_row(&acc, y, &frame[y * frame_w]); /* unsampled rows are skipped */
+    return sig;
+}
+
+/* Feeds sig until the screen settles; returns the ticks it took (0: never
+ * within max). */
+static int settle(SceneTracker *t, const SceneSig *sig, int64_t *now, int max)
+{
+    for (int i = 1; i <= max; i++)
+        if (scene_update(t, sig, *now += TICK, NO_INPUT, NO_INPUT))
+            return i;
+    return 0;
+}
+
+static void test_scene_grid(void)
+{
+    SceneAcc acc;
+    SceneSig sig;
+    memset(&acc, 0, sizeof(acc));
+    scene_acc_begin(&acc, &sig, 960, 544);
+    TEST_CHECK(acc.cols == 16 && acc.ystep == 16 && acc.xstep == 4);
+    scene_acc_begin(&acc, &sig, 900, 120); /* a text box: 32x4 */
+    TEST_CHECK(acc.cols == 32 && acc.y0[4] == 120);
+    scene_acc_begin(&acc, &sig, 32, 32);
+    TEST_CHECK(acc.ystep == 1 && acc.xstep == 1);
+    /* every grid row gets a sampled row */
+    for (uint32_t h = 32; h <= 544; h += 7) {
+        scene_acc_begin(&acc, &sig, 960, h);
+        for (uint32_t r = 0; acc.y0[r] < h; r++)
+            TEST_CHECK(acc.y0[r + 1] - acc.y0[r] >= acc.ystep);
+    }
+}
+
+static void test_scene_changes(void)
+{
+    SceneTracker t;
+    SceneSig a, b, sig;
+    int64_t now = 1000000;
+    uint32_t id;
+    memset(&t, 0, sizeof(t));
+
+    /* the first frame is a new screen; it settles once, after the window */
+    frame_new(960, 544);
+    frame_text(40, 420, 100, 12);
+    a = frame_sig();
+    TEST_CHECK(scene_update(&t, &a, now, NO_INPUT, NO_INPUT) == 0 && t.id == 1 && !t.stable);
+    TEST_CHECK(settle(&t, &a, &now, 10) == 3);
+    TEST_CHECK(t.stable && scene_unsettled_us(&t, now) == 0);
+    TEST_CHECK(scene_update(&t, &a, now += TICK, NO_INPUT, NO_INPUT) == 0);
+
+    /* another line of the same length and ink: a new screen, and a capture
+     * of the previous line (taken just before) does not match it */
+    frame_new(960, 544);
+    frame_text(40, 420, 200, 12);
+    b = frame_sig();
+    TEST_CHECK(scene_update(&t, &b, now += TICK, NO_INPUT, NO_INPUT) == 0 && t.id == 2 && !t.stable);
+    TEST_CHECK(scene_match(&t, &a) == 0 && scene_match(&t, &b) == 2);
+
+    /* a two-glyph reply replaced by another one, a line per 0.4 s */
+    frame_new(960, 544);
+    frame_text(40, 420, 300, 2);
+    sig = frame_sig();
+    scene_update(&t, &sig, now += 400000, NO_INPUT, NO_INPUT);
+    id = t.id;
+    frame_new(960, 544);
+    frame_text(40, 420, 400, 2);
+    sig = frame_sig();
+    TEST_CHECK(scene_update(&t, &sig, now += 400000, NO_INPUT, NO_INPUT) == 0 && t.id == id + 1);
+
+    /* a different grid (resolution or region): a new screen */
+    frame_new(480, 272);
+    sig = frame_sig();
+    TEST_CHECK(scene_match(&t, &sig) == 0);
+    TEST_CHECK(scene_update(&t, &sig, now += TICK, NO_INPUT, NO_INPUT) == 0 && t.id == id + 2);
+
+    /* a reset keeps the numbering: an old number never matches again */
+    id = t.id;
+    scene_reset(&t);
+    TEST_CHECK(scene_match(&t, &sig) == 0);
+    TEST_CHECK(scene_update(&t, &sig, now += TICK, NO_INPUT, NO_INPUT) == 0 && t.id == id + 1);
+}
+
+/* A text box (900x120: 32x4 cells of about 28x30 px). */
+#define ARROW_X 846 /* inside one cell */
+#define ARROW_Y 92
+
+static SceneSig box_with_line(uint32_t seed, uint32_t arrow)
+{
+    frame_new(900, 120);
+    frame_text(20, 10, seed, 20);
+    if (arrow)
+        frame_rect(ARROW_X, ARROW_Y, 20, 20, arrow);
+    return frame_sig();
+}
+
+/* Feeds an icon cycling through n states (one per `every` signatures)
+ * for `ticks` signatures; returns how often the screen settled. */
+static int run_icon(SceneTracker *t, const SceneSig *states, int n, int every, int ticks, int64_t *now)
+{
+    int settled = 0;
+    for (int i = 0; i < ticks; i++)
+        settled += scene_update(t, &states[i / every % n], *now += TICK, NO_INPUT, NO_INPUT);
+    return settled;
+}
+
+/* The "next" arrow blinks (about 0.5 s on, 0.5 s off). Its first
+ * appearance is a new state, which settles like any change; once it goes
+ * back to a recent state, settling waits until it has blinked for
+ * SCENE_ANIM_SPAN_US and is masked, then the screen settles for good; a
+ * capture with it on or off is the screen. */
+static void test_scene_blinking(void)
+{
+    SceneTracker t;
+    SceneSig st[2] = {box_with_line(100, WHITE), box_with_line(100, 0)};
+    int64_t now = 1000000;
+    uint32_t id;
+    memset(&t, 0, sizeof(t));
+
+    scene_update(&t, &st[1], now, NO_INPUT, NO_INPUT);
+    TEST_CHECK(settle(&t, &st[1], &now, 10) == 3);
+    TEST_CHECK(run_icon(&t, st, 2, 4, 24, &now) == 2); /* 3.2 s */
+    id = t.id;
+    TEST_CHECK(t.stable && t.masked == 1);
+    TEST_CHECK(run_icon(&t, st, 2, 4, 40, &now) == 0 && t.id == id);
+    TEST_CHECK(scene_match(&t, &st[0]) == id && scene_match(&t, &st[1]) == id);
+
+    /* a slow blink (1 s on, 1 s off) is masked too */
+    memset(&t, 0, sizeof(t));
+    scene_update(&t, &st[1], now, NO_INPUT, NO_INPUT);
+    TEST_CHECK(run_icon(&t, st, 2, 8, 40, &now) == 2 && t.masked == 1);
+}
+
+/* An icon with many states (bobbing, color cycle) changes every signature. */
+static void test_scene_animated_icon(void)
+{
+    static const uint32_t colors[6] = {0xFF0000FFu, 0xFF00FF00u, 0xFFFF0000u,
+                                       0xFF00FFFFu, 0xFFFF00FFu, 0xFFFFFF00u};
+    SceneTracker t;
+    SceneSig st[6];
+    int64_t now = 1000000;
+    uint32_t id;
+    memset(&t, 0, sizeof(t));
+
+    for (int k = 0; k < 6; k++)
+        st[k] = box_with_line(100, colors[k]);
+    TEST_CHECK(run_icon(&t, st, 6, 1, 24, &now) == 1); /* revisits from the 7th state */
+    id = t.id;
+    TEST_CHECK(run_icon(&t, st, 6, 1, 40, &now) == 0 && t.id == id && t.masked == 1);
+
+    /* the next line under the still blinking icon: a change */
+    {
+        SceneSig next[6];
+        for (int k = 0; k < 6; k++) {
+            next[k] = box_with_line(200, colors[k]);
+        }
+        TEST_CHECK(scene_update(&t, &next[0], now += TICK, NO_INPUT, NO_INPUT) == 0 && t.id == id + 1);
+    }
+}
+
+/* The icon stops in another state than the screen's first frame: once its
+ * mask ends, that is a change (whatever the mask hid is seen). */
+static void test_scene_mask_expires(void)
+{
+    SceneTracker t;
+    SceneSig st[2] = {box_with_line(100, WHITE), box_with_line(100, 0)};
+    int64_t now = 1000000;
+    uint32_t id;
+    int ticks = 0;
+    memset(&t, 0, sizeof(t));
+
+    scene_update(&t, &st[0], now, NO_INPUT, NO_INPUT);
+    run_icon(&t, st, 2, 4, 30, &now); /* ends on st[1] */
+    id = t.id;
+    TEST_CHECK(t.masked == 1 && scene_match(&t, &st[1]) == id);
+    while (t.id == id && ticks++ < 30)
+        scene_update(&t, &st[1], now += TICK, NO_INPUT, NO_INPUT);
+    TEST_CHECK(t.id == id + 1 && t.masked == 0);
+    TEST_CHECK((int64_t)ticks * TICK <= SCENE_ANIM_GAP_US + 2 * TICK);
+}
+
+/* An animated background: too many cells to mask, so nothing is masked
+ * (it would hide the text) and it never settles. */
+static void test_scene_animated_background(void)
+{
+    SceneTracker t;
+    SceneSig st[3];
+    int64_t now = 1000000;
+    memset(&t, 0, sizeof(t));
+
+    for (int k = 0; k < 3; k++) {
+        frame_new(960, 544);
+        frame_rect(0, 0, 960, 200, 0xFF000000u + (uint32_t)k * 40);
+        frame_text(40, 420, 100, 12);
+        st[k] = frame_sig();
+    }
+    TEST_CHECK(run_icon(&t, st, 3, 1, 60, &now) == 0);
+    TEST_CHECK(t.masked == 0 && scene_unsettled_us(&t, now) >= 59 * TICK);
+}
+
+/* Going back to the previous screen is a change, however small: a menu
+ * cursor moved to item B and back to A must not keep B's number. It settles
+ * once it is clear that this is no animation. */
+static void test_scene_revert(void)
+{
+    SceneTracker t;
+    SceneSig st[2];
+    int64_t now = 1000000;
+    uint32_t id;
+    int ticks;
+    memset(&t, 0, sizeof(t));
+
+    for (uint32_t k = 0; k < 2; k++) {
+        frame_new(960, 544);
+        frame_text(40, 420, 100 + k * 100, 2);
+        st[k] = frame_sig();
+    }
+    scene_update(&t, &st[0], now, NO_INPUT, NO_INPUT);
+    TEST_CHECK(settle(&t, &st[0], &now, 10) == 3);
+    scene_update(&t, &st[1], now += TICK, NO_INPUT, NO_INPUT);
+    TEST_CHECK(settle(&t, &st[1], &now, 10) == 3);
+    id = t.id;
+    TEST_CHECK(scene_update(&t, &st[0], now += TICK, NO_INPUT, NO_INPUT) == 0 && t.id == id + 1);
+    TEST_CHECK(scene_match(&t, &st[0]) == id + 1 && scene_match(&t, &st[1]) == 0);
+    /* an icon-sized revert waits until it is clear it is no blink */
+    ticks = settle(&t, &st[0], &now, 20);
+    TEST_CHECK(ticks > 3 && (int64_t)ticks * TICK <= SCENE_ANIM_GAP_US + 2 * TICK);
+
+    /* moved back and forth for seconds: that is masked like an icon, but
+     * once it stops, the mask ends and that is a change */
+    run_icon(&t, st, 2, 3, 30, &now); /* ends on st[1] */
+    id = t.id;
+    TEST_CHECK(t.masked == 2); /* the two glyphs' cells */
+    ticks = 0;
+    while (t.id == id && ticks++ < 30)
+        scene_update(&t, &st[1], now += TICK, NO_INPUT, NO_INPUT);
+    TEST_CHECK(t.id == id + 1 && scene_match(&t, &st[1]) == t.id && scene_match(&t, &st[0]) == 0);
+}
+
+/* A menu scrolled up and down for seconds, a press per item: changes the
+ * player causes are never animation, so stopping on an item is a change at
+ * once and a capture taken while scrolling does not match it. Item texts
+ * of n glyphs (1 glyph: one cell, like an icon). */
+static void menu_scroll(uint32_t glyphs)
+{
+    SceneTracker t;
+    SceneSig item[4];
+    int64_t now = 1000000;
+    uint32_t id;
+    memset(&t, 0, sizeof(t));
+
+    for (uint32_t k = 0; k < 4; k++) {
+        frame_new(960, 544);
+        frame_text(40, 420, 100 + k * 50, (int)glyphs);
+        item[k] = frame_sig();
+    }
+    scene_update(&t, &item[0], now, NO_INPUT, NO_INPUT);
+    for (int step = 0; step < 12; step++) { /* 0.4 s per item, 4.8 s */
+        int k = step % 6 < 3 ? step % 6 : 6 - step % 6; /* 0 1 2 3 2 1 0 ... */
+        int64_t pressed = now + TICK / 2;
+        for (int i = 0; i < 3; i++) {
+            scene_update(&t, &item[k], now += TICK, pressed, pressed);
+            TEST_CHECK(t.masked == 0);
+        }
+    }
+    id = t.id; /* scrolling ended on item 1: stop on item 3 */
+    TEST_CHECK(scene_match(&t, &item[1]) == id);
+    now += TICK;
+    TEST_CHECK(scene_update(&t, &item[3], now, now - TICK / 2, now - TICK / 2) == 0 && t.id == id + 1);
+    TEST_CHECK(scene_match(&t, &item[3]) == t.id && scene_match(&t, &item[1]) == 0);
+
+    /* wiggled 3, 2, 3, 2 right after: each step is a change */
+    for (int i = 0; i < 4; i++) {
+        id = t.id;
+        now += 3 * TICK;
+        TEST_CHECK(scene_update(&t, &item[i % 2 ? 3 : 2], now, now - TICK / 2, now - TICK / 2) == 0);
+        TEST_CHECK(t.id == id + 1 && t.masked == 0);
+    }
+}
+
+static void test_scene_menu_scroll(void)
+{
+    menu_scroll(12); /* descriptions */
+    menu_scroll(1);  /* one-glyph names: 剣, 槍, 斧, 弓 */
+}
+
+/* The documented gap: a menu cycled with no input recorded (it advances by
+ * itself, or reacts later than SCENE_INPUT_US) is masked like an icon, and
+ * the stop is seen once the mask ends. */
+static void test_scene_menu_without_input(void)
+{
+    SceneTracker t;
+    SceneSig item[2];
+    int64_t now = 1000000;
+    uint32_t id;
+    int ticks = 0;
+    memset(&t, 0, sizeof(t));
+
+    for (uint32_t k = 0; k < 2; k++) {
+        frame_new(960, 544);
+        frame_text(10, 420, 100 + k * 50, 1); /* inside one cell */
+        item[k] = frame_sig();
+    }
+    scene_update(&t, &item[0], now, NO_INPUT, NO_INPUT);
+    run_icon(&t, item, 2, 3, 30, &now); /* ends on item 1 */
+    id = t.id;
+    TEST_CHECK(t.masked == 1 && scene_match(&t, &item[0]) == id);
+    while (t.id == id && ticks++ < 30)
+        scene_update(&t, &item[1], now += TICK, NO_INPUT, NO_INPUT);
+    TEST_CHECK(t.id == id + 1 && (int64_t)ticks * TICK <= SCENE_ANIM_GAP_US + 2 * TICK);
+    TEST_CHECK(scene_match(&t, &item[0]) == 0);
+}
+
+/* A held button (no edge after the press) keeps a masked icon masked; a
+ * press or release ends the masks (a change), and the icon is masked again
+ * once it cycles. */
+static void test_scene_input_and_masks(void)
+{
+    SceneTracker t;
+    SceneSig st[2] = {box_with_line(100, WHITE), box_with_line(100, 0)};
+    int64_t now = 1000000, edge;
+    uint32_t id;
+    int settled = 0;
+    memset(&t, 0, sizeof(t));
+
+    scene_update(&t, &st[1], now, NO_INPUT, NO_INPUT);
+    run_icon(&t, st, 2, 4, 24, &now);
+    id = t.id;
+    TEST_CHECK(t.masked == 1 && t.stable);
+    edge = now + TICK / 2; /* pressed, then held for 5 s */
+    for (int i = 0; i < 40; i++) {
+        now += TICK;
+        settled += scene_update(&t, &st[i / 4 % 2], now, now - edge <= 1500000 ? now : edge + 1500000, edge);
+        if (i == 0)
+            TEST_CHECK(t.id == id + 1 && t.masked == 0); /* the press */
+    }
+    /* the blinks in the held-input window are the player's: a few settles
+     * until it is masked again */
+    id = t.id;
+    TEST_CHECK(t.masked == 1 && t.stable && settled <= 5);
+    settled = 0;
+    for (int i = 0; i < 24; i++)
+        settled += scene_update(&t, &st[i / 4 % 2], now += TICK, edge + 1500000, edge);
+    TEST_CHECK(t.id == id && settled == 0);
+}
+
+/* A short wrapping menu scrolled by a held button for 5 s (auto-repeat
+ * past the held-input window: masked like an icon), then tapped back: each
+ * tap is seen, and so is the release without taps. */
+static void test_scene_held_scroll(void)
+{
+    SceneTracker t;
+    SceneSig item[4];
+    int64_t now = 1000000, edge;
+    int k = 0;
+    memset(&t, 0, sizeof(t));
+
+    for (uint32_t n = 0; n < 4; n++) {
+        frame_new(960, 544);
+        frame_text(10, 420, 100 + n * 50, 1);
+        item[n] = frame_sig();
+    }
+    scene_update(&t, &item[0], now, NO_INPUT, NO_INPUT);
+    edge = now + TICK / 2;
+    for (int i = 0; i < 38; i++) { /* an item per 2 signatures */
+        if (i % 2 == 0)
+            k = (k + 1) % 4;
+        now += TICK;
+        scene_update(&t, &item[k], now, now - edge <= 1500000 ? now : edge + 1500000, edge);
+    }
+    TEST_CHECK(t.masked == 1); /* the documented held-scroll residual */
+    for (int tap = 0; tap < 2; tap++) { /* released, then tapped back twice */
+        uint32_t id = t.id;
+        edge = now + TICK / 2;
+        k = (k + 3) % 4;
+        now += 2 * TICK;
+        scene_update(&t, &item[k], now, edge, edge);
+        TEST_CHECK(t.id > id && t.masked == 0);
+        TEST_CHECK(scene_match(&t, &item[k]) == t.id && scene_match(&t, &item[(k + 1) % 4]) == 0);
+    }
+}
+
+/* Two icons blinking at different rates (the "next" arrow and an AUTO
+ * mark): both are masked and the screen settles for good. */
+static void test_scene_two_icons(void)
+{
+    SceneTracker t;
+    SceneSig st[4];
+    int64_t now = 1000000;
+    int settled = 0;
+    memset(&t, 0, sizeof(t));
+
+    for (int k = 0; k < 4; k++) {
+        frame_new(900, 120);
+        frame_text(20, 10, 100, 20);
+        if (k & 1)
+            frame_rect(ARROW_X, ARROW_Y, 20, 20, WHITE);
+        if (k & 2)
+            frame_rect(2, 92, 20, 20, WHITE); /* inside the first cell */
+        st[k] = frame_sig();
+    }
+    for (int i = 0; i < 40; i++) /* the arrow every 4 signatures, AUTO every 6 */
+        settled += scene_update(&t, &st[(i / 4 % 2) | (i / 6 % 2) << 1], now += TICK, NO_INPUT, NO_INPUT);
+    TEST_CHECK(t.masked == 2 && t.stable && settled <= 3);
+    settled = 0;
+    for (int i = 40; i < 120; i++)
+        settled += scene_update(&t, &st[(i / 4 % 2) | (i / 6 % 2) << 1], now += TICK, NO_INPUT, NO_INPUT);
+    TEST_CHECK(settled == 0 && t.masked == 2);
+}
+
+/* A line replaced by a shorter one: its tail goes back to empty cells
+ * (states seen before), which is no animation: it settles as usual. */
+static void test_scene_shorter_line(void)
+{
+    SceneTracker t;
+    SceneSig line_long, line_short;
+    int64_t now = 1000000;
+    memset(&t, 0, sizeof(t));
+
+    frame_new(960, 544);
+    line_long = frame_sig();
+    scene_update(&t, &line_long, now, NO_INPUT, NO_INPUT);
+    frame_text(40, 420, 100, 12);
+    line_long = frame_sig();
+    scene_update(&t, &line_long, now += TICK, NO_INPUT, NO_INPUT);
+    TEST_CHECK(settle(&t, &line_long, &now, 10) == 3);
+    frame_new(960, 544);
+    frame_text(40, 420, 200, 3);
+    line_short = frame_sig();
+    scene_update(&t, &line_short, now += TICK, NO_INPUT, NO_INPUT);
+    TEST_CHECK(settle(&t, &line_short, &now, 10) == 3);
+}
+
+/* The next line's arrow, soon after the last one's mask ended (it was
+ * hidden while the line was typed): masked as soon as it cycles. */
+static void test_scene_warm_mask(void)
+{
+    SceneTracker t;
+    SceneSig st[2] = {box_with_line(100, WHITE), box_with_line(100, 0)};
+    SceneSig next[2] = {box_with_line(200, WHITE), box_with_line(200, 0)};
+    int64_t now = 1000000;
+    int settled = 0, ticks = 0;
+    memset(&t, 0, sizeof(t));
+
+    scene_update(&t, &st[1], now, NO_INPUT, NO_INPUT);
+    run_icon(&t, st, 2, 4, 24, &now);
+    TEST_CHECK(t.masked == 1);
+    while (t.masked && ticks++ < 30) /* the next line, typed for 2 s */
+        scene_update(&t, &next[1], now += TICK, NO_INPUT, NO_INPUT);
+    run_icon(&t, &next[1], 1, 1, 13, &now);
+    settled = run_icon(&t, next, 2, 4, 14, &now); /* on, off, on, off */
+    TEST_CHECK(t.masked == 1 && t.stable);
+    TEST_CHECK(settled <= 1);
+    TEST_CHECK(run_icon(&t, next, 2, 4, 16, &now) == 0);
+}
+
+/* Short lines (two glyphs) faded in and out over 4 signatures each, shown
+ * 0.8 s: every line is a new screen that settles, and a capture of one
+ * never matches another. */
+static void test_scene_fades(void)
+{
+    static const uint32_t levels[4] = {0xFF404040u, 0xFF808080u, 0xFFC0C0C0u, WHITE};
+    SceneTracker t;
+    SceneSig sig, prev;
+    int64_t now = 1000000;
+    memset(&t, 0, sizeof(t));
+
+    frame_new(960, 544);
+    sig = prev = frame_sig();
+    scene_update(&t, &sig, now, NO_INPUT, NO_INPUT);
+    for (uint32_t line = 0; line < 8; line++) {
+        for (int step = 0; step < 4; step++) { /* fade in */
+            frame_new(960, 544);
+            frame_text(40, 420, 100 + line * 10, 2);
+            for (uint32_t p = 0; p < 960 * 544; p++)
+                if (frame[p] == WHITE)
+                    frame[p] = levels[step];
+            sig = frame_sig();
+            scene_update(&t, &sig, now += TICK, NO_INPUT, NO_INPUT);
+        }
+        TEST_CHECK(settle(&t, &sig, &now, 6) == 3);
+        TEST_CHECK(scene_match(&t, &sig) == t.id && scene_match(&t, &prev) == 0);
+        prev = sig;
+        for (int step = 3; step >= 0; step--) { /* fade out */
+            frame_new(960, 544);
+            frame_text(40, 420, 100 + line * 10, 2);
+            for (uint32_t p = 0; p < 960 * 544; p++)
+                if (frame[p] == WHITE)
+                    frame[p] = step ? levels[step - 1] : DARK;
+            sig = frame_sig();
+            scene_update(&t, &sig, now += TICK, NO_INPUT, NO_INPUT);
+        }
+    }
+}
+
+/* Typewriter text: each glyph is a change, a pause shorter than the window
+ * does not settle it, and it settles a window after the last glyph. */
+static void test_scene_typewriter(void)
+{
+    SceneTracker t;
+    SceneSig sig;
+    int64_t now = 1000000, started;
+    memset(&t, 0, sizeof(t));
+
+    frame_new(900, 120);
+    sig = frame_sig();
+    scene_update(&t, &sig, now, NO_INPUT, NO_INPUT);
+    TEST_CHECK(settle(&t, &sig, &now, 10) == 3);
+    started = now + TICK;
+    for (int i = 0; i < 16; i++) {
+        uint32_t id = t.id;
+        frame_glyph(20 + (uint32_t)i * GLYPH, 10, 100 + (uint32_t)i);
+        sig = frame_sig();
+        TEST_CHECK(scene_update(&t, &sig, now += TICK, NO_INPUT, NO_INPUT) == 0 && t.id == id + 1);
+        if (i == 7) /* a pause after a comma: 2 ticks < SCENE_STABLE_US */
+            TEST_CHECK(settle(&t, &sig, &now, 2) == 0);
+    }
+    TEST_CHECK(scene_unsettled_us(&t, now) == now - started);
+    TEST_CHECK(settle(&t, &sig, &now, 10) == 3);
+}
+
 TEST_LIST = {
     {"pb_roundtrip", test_pb_roundtrip},
     {"buf_interleaved", test_buf_interleaved},
@@ -1031,6 +1605,22 @@ TEST_LIST = {
     {"foreground", test_foreground},
     {"trigger_edges", test_trigger_edges},
     {"trigger_filter", test_trigger_filter},
+    {"scene_grid", test_scene_grid},
+    {"scene_changes", test_scene_changes},
+    {"scene_blinking", test_scene_blinking},
+    {"scene_animated_icon", test_scene_animated_icon},
+    {"scene_mask_expires", test_scene_mask_expires},
+    {"scene_animated_background", test_scene_animated_background},
+    {"scene_revert", test_scene_revert},
+    {"scene_menu_scroll", test_scene_menu_scroll},
+    {"scene_menu_without_input", test_scene_menu_without_input},
+    {"scene_input_and_masks", test_scene_input_and_masks},
+    {"scene_held_scroll", test_scene_held_scroll},
+    {"scene_two_icons", test_scene_two_icons},
+    {"scene_shorter_line", test_scene_shorter_line},
+    {"scene_warm_mask", test_scene_warm_mask},
+    {"scene_fades", test_scene_fades},
+    {"scene_typewriter", test_scene_typewriter},
     {"config", test_config},
     {"regions", test_regions},
     {"http", test_http},

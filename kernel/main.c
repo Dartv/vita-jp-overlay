@@ -17,34 +17,44 @@ static volatile int worker_run = 1;
 
 #define POLL_US         16000   /* input poll period */
 #define CHECK_EVERY     4       /* change detection every 4th poll (~64 ms) */
-#define STABLE_US       300000  /* unchanged this long = stable */
 #define CAPTURE_WAIT_US 1500000 /* no new frame from the game within this -> timeout */
 
+/* Called with the lock held. Signatures already published are skipped. One
+ * the hook is still building for the old region can still arrive; it only
+ * costs an extra change. */
 static void reset_change_detection(void)
 {
-    g.checksum = 0;
-    g.stable = 0;
-    g.stable_fired = 0;
-    g.last_change_us = ksceKernelGetSystemTimeWide();
+    scene_reset(&g.tracker);
+    g.seen_sig_seq = g.hook_sig_seq;
 }
 
 static void change_detection(void)
 {
-    uint32_t cs, seq = g.hook_checksum_seq;
-    int64_t now;
-    if (g.game_pid <= 0 || !g.game_active || seq == g.seen_checksum_seq)
+    static SceneSig sig;
+    uint32_t seq, id = 0;
+    int settled = 0, animated = 0;
+    if (g.game_pid <= 0 || !g.game_active)
         return;
-    g.seen_checksum_seq = seq;
-    cs = g.hook_checksum;
-    now = ksceKernelGetSystemTimeWide();
-    if (cs != g.checksum) {
-        g.checksum = cs;
-        g.stable = 0;
-        g.stable_fired = 0;
-        g.last_change_us = now;
-    } else if (!g.stable_fired && now - g.last_change_us >= STABLE_US) {
-        g.stable = 1;
-        g.stable_fired = 1;
+    VJO_LOCK(); /* against reset_change_detection */
+    seq = g.hook_sig_seq;
+    if (seq != g.seen_sig_seq) {
+        __sync_synchronize(); /* pairs with the hook's barrier */
+        sig = g.hook_sig[seq & 1];
+        __sync_synchronize();
+        if (g.hook_sig_seq == seq) { /* else rewritten meanwhile: next poll */
+            g.seen_sig_seq = seq;
+            int64_t now = ksceKernelGetSystemTimeWide();
+            /* the low 32 bits, widened: within the last 71 min */
+            int64_t input_us = now - (uint32_t)((uint32_t)now - g.input_us32);
+            int64_t edge_us = now - (uint32_t)((uint32_t)now - g.input_edge_us32);
+            settled = scene_update(&g.tracker, &sig, now, input_us, edge_us);
+            id = g.tracker.id;
+            animated = g.tracker.masked;
+        }
+    }
+    VJO_UNLOCK();
+    if (settled) {
+        klog("region settled: scene %u (%d animated cells masked)", id, animated);
         ksceKernelSetEventFlag(g.evf, VJO_EV_REGION_STABLE);
     }
 }
@@ -58,6 +68,7 @@ static void finish_capture(void)
             g.capture_result = VJO_ERR_NO_GAME;
     }
     g.raw_valid = g.capture_result == 0;
+    g.capture_scene = g.raw_valid && !g.capture_full ? scene_match(&g.tracker, &g.capture_sig) : 0;
     g.done_seq = g.capture_seq;
     g.capture_state = CAPTURE_IDLE;
     VJO_UNLOCK();
@@ -267,13 +278,16 @@ int vjoGetState(VjoState *out)
     s.fb_height = g.fb_h;
     s.fb_pitch = g.fb_pitch;
     s.fb_pixelformat = g.fb_fmt;
-    s.checksum = g.checksum;
-    s.stable = g.stable;
+    VJO_LOCK();
+    s.scene = g.tracker.id;
+    s.stable = g.tracker.stable;
+    s.unsettled_ms = (uint32_t)(scene_unsettled_us(&g.tracker, ksceKernelGetSystemTimeWide()) / 1000);
+    VJO_UNLOCK();
     s.alloc_status = g.alloc_status;
     s.capture_result = g.capture_result;
     s.width = g.crop_w;
     s.height = g.crop_h;
-    s.capture_checksum = g.capture_checksum;
+    s.capture_scene = g.capture_scene;
     s.raw_stride = g.raw_stride;
     s.done_seq = g.done_seq;
     if (size >= sizeof(uint32_t))
@@ -436,6 +450,7 @@ int module_start(SceSize argc, const void *args)
     memset(&g, 0, sizeof(g));
     g.trigger[TRIG_TOGGLE] = VJO_TRIGGER_L_R;
     g.trigger[TRIG_SUBTITLE] = VJO_TRIGGER_SELECT_R;
+    g.input_us32 = g.input_edge_us32 = (uint32_t)(ksceKernelGetSystemTimeWide() - 3600000000LL); /* none yet */
     g.evf = ksceKernelCreateEventFlag("VjoEvents", SCE_EVENT_WAITMULTIPLE, 0, NULL);
     g.ievf = ksceKernelCreateEventFlag("VjoInternal", 0, 0, NULL);
     g.lock = ksceKernelCreateMutex("VjoLock", 0, 0, NULL);

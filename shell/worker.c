@@ -23,6 +23,7 @@
 #define BACKOFF_MAX_US    60000000LL
 #define JPEG_QUALITY      80
 #define SUBTITLE_GAP_US   1000000LL /* between subtitle jobs */
+#define UNSETTLED_US      2000000LL /* subtitles: a region that keeps changing is recognized this often */
 
 VjoView g_view;
 
@@ -40,7 +41,7 @@ static VjoArena results[2];
 static VjoArena scratch; /* static; control thread only */
 static uint8_t scratch_mem[SCRATCH_SIZE];
 static int active = -1;               /* results[] index shown/cached */
-static uint32_t cache_checksum;
+static uint32_t cache_scene; /* VjoState.scene of the cached result, 0 = unknown */
 static int cache_ok;
 static VjoOverlayData cache_data[2];
 
@@ -80,7 +81,7 @@ static volatile int job_running;
 static volatile int job_done;
 static volatile int job_idx;
 static volatile int job_rc;
-static volatile uint32_t job_checksum;
+static volatile uint32_t job_scene;
 static volatile int job_lookup;     /* the job looks the words up (else OCR only) */
 /* cache_data[job_idx].sentence is ready (the lookup may still run): the
  * net thread only appends to the arena, so the control thread may read it */
@@ -111,6 +112,12 @@ void vjo_post_command(int cmd, const VjoRect *rect)
 static int64_t now_us(void)
 {
     return (int64_t)sceKernelGetProcessTimeWide();
+}
+
+/* Does a result for scene `a` show the current scene `b`? */
+static int same_scene(uint32_t a, uint32_t b)
+{
+    return a != 0 && a == b;
 }
 
 /* ---------------- memory ---------------- */
@@ -278,7 +285,7 @@ out:
     return rc;
 }
 
-static int run_job(VjoArena *a, VjoOverlayData *out, uint32_t *checksum)
+static int run_job(VjoArena *a, VjoOverlayData *out, uint32_t *scene)
 {
     VjoState st;
     VjoJpegSource src;
@@ -288,12 +295,12 @@ static int run_job(VjoArena *a, VjoOverlayData *out, uint32_t *checksum)
     sceClibMemset(out, 0, sizeof(*out));
     out->list.header = "";
     vjo_buf_init(&jb, a);
-    st.capture_checksum = 0;
+    st.capture_scene = 0;
     if ((out->err.rc = vjo_capture_jpeg(a, 0, JPEG_QUALITY, &jb, &st)) != VJO_OK) {
         out->failed_stage = VJO_STAGE_OCR;
         return out->err.rc;
     }
-    *checksum = st.capture_checksum;
+    *scene = st.capture_scene;
     sceClibMemset(&src, 0, sizeof(src));
     src.width = st.width;
     src.height = st.height;
@@ -320,11 +327,11 @@ static int net_main(SceSize args, void *argp)
             break;
         if (bits & NET_EV_JOB) {
             int idx = job_idx;
-            uint32_t cs = 0;
+            uint32_t scene = 0;
             int64_t t0 = now_us();
             vjo_arena_reset(&results[idx]);
-            job_rc = run_job(&results[idx], &cache_data[idx], &cs);
-            job_checksum = cs;
+            job_rc = run_job(&results[idx], &cache_data[idx], &scene);
+            job_scene = scene;
             vjo_log("job %d done rc=%d in %d ms, arena peak %u", idx, job_rc,
                     (int)((now_us() - t0) / 1000), (unsigned)results[idx].peak);
             __sync_synchronize(); /* results are visible before job_done */
@@ -403,7 +410,7 @@ static void open_overlay(void)
         view_publish(1, NULL, "Not enough memory to capture the screen", 1);
         return;
     }
-    if (cfg.ocr_mode == VJO_OCR_AUTO && cache_ok && active >= 0 && cache_checksum == st.checksum) {
+    if (cfg.ocr_mode == VJO_OCR_AUTO && cache_ok && active >= 0 && same_scene(cache_scene, st.scene)) {
         vjo_log("open: background result");
         view_show_cache();
         return;
@@ -484,7 +491,7 @@ static void on_job_done(void)
     vjo_view_lock();
     active = idx;
     cache_ok = d->err.rc == VJO_OK && job_lookup; /* the overlay needs the lookup */
-    cache_checksum = job_checksum;
+    cache_scene = job_scene;
     vjo_view_unlock();
     if (subtitles)
         strip_show_result(d);
@@ -493,7 +500,7 @@ static void on_job_done(void)
         ov = OV_OPEN;
         st.size = sizeof(st);
         vjoGetState(&st);
-        if (job_checksum != st.checksum || !job_lookup) {
+        if (!same_scene(job_scene, st.scene) || !job_lookup) {
             start_job(job_lookup ? "result was for an earlier screen" : "the running job was OCR only", 1);
             return;
         }
@@ -543,7 +550,7 @@ static void set_subtitles(int on)
         strip_publish("Not enough memory to capture the screen", VJO_STRIP_ERROR, 0);
         return;
     }
-    if (!job_running && d && d->sentence && cache_checksum == st.checksum) {
+    if (!job_running && d && d->sentence && same_scene(cache_scene, st.scene)) {
         strip_publish(d->sentence, VJO_STRIP_SENTENCE, 0);
         return;
     }
@@ -724,18 +731,27 @@ static int background_throttled(void)
 }
 
 /* A stable event that arrives while busy (or throttled) is kept, so the
- * newest screen is still recognized afterwards. */
+ * newest screen is still recognized afterwards. With subtitles, a region
+ * that never settles (a video behind the text) is recognized every
+ * UNSETTLED_US anyway. */
 static void auto_prefetch(void)
 {
     VjoState st;
-    if (!stable_pending || ov != OV_CLOSED || job_running || !game_active() || !background_wanted() ||
-        background_throttled())
+    int unsettled_due;
+    if (ov != OV_CLOSED || job_running || !game_active() || !background_wanted() || background_throttled())
         return;
-    stable_pending = 0;
+    unsettled_due = subtitles && now_us() - job_started_us >= UNSETTLED_US;
+    if (!stable_pending && !unsettled_due)
+        return;
     st.size = sizeof(st);
     vjoGetState(&st);
-    if (st.stable && !(cache_ok && st.checksum == cache_checksum))
-        start_job("auto: screen settled", want_lookup());
+    if (stable_pending) {
+        stable_pending = 0;
+        if (st.stable && !(cache_ok && same_scene(cache_scene, st.scene)))
+            start_job("auto: screen settled", want_lookup());
+    } else if (st.unsettled_ms >= UNSETTLED_US / 1000) {
+        start_job("subtitles: screen keeps changing", 0); /* no lookup every 2 s */
+    }
 }
 
 static int ctl_main(SceSize args, void *argp)
