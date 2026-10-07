@@ -72,6 +72,8 @@ In the overlay:
 | □                | Choose the area to read in this game. Drag a box on the touchscreen, then press × to keep it or ○ to cancel. Holding □ sets the full screen. |
 | ○, or the toggle | Close the overlay.                                                                                                                           |
 
+Works with PSP games in Adrenaline. They all share one OCR region, because every PSP game runs inside the same emulator app.
+
 
 
 

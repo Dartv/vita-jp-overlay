@@ -96,8 +96,8 @@ static int copy_from_game(void *dst, uintptr_t src, uint32_t len)
 }
 
 /* Copies the region (or, for a VJO_CAPTURE_FULL request, the whole frame)
- * of a game frame into g.raw (A8B8G8R8, raw_stride bytes per row). Display
- * hook only (game context). */
+ * of a game frame into g.raw (A8B8G8R8, raw_stride bytes per row). Game
+ * context only (display or pad hook, display.c). */
 int capture_copy(uintptr_t base, uint32_t pitch, uint32_t fmt, uint32_t w, uint32_t h)
 {
     uint32_t x, y, cw, ch, bpp, stride, hash = 2166136261u;
@@ -138,8 +138,8 @@ int capture_copy(uintptr_t base, uint32_t pitch, uint32_t fmt, uint32_t w, uint3
     return 0;
 }
 
-/* Display hook (game context): checksum of the region of the frame being
- * submitted. Same-process copies only, as PSVshell/reVita do in this hook;
+/* Game context (display or pad hook): checksum of the region of the frame.
+ * Same-process copies only, as PSVshell/reVita do in the display hook;
  * reading another process' framebuffer from the worker crashed the console. */
 uint32_t region_checksum_hook(uintptr_t base, uint32_t pitch, uint32_t fmt, uint32_t w, uint32_t h)
 {

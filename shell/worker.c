@@ -625,14 +625,21 @@ static int lookup_title(SceUID pid, char *tid, int size)
     return ret < 0 ? ret : -1;
 }
 
-static int is_excluded_title(const char *tid)
+/* vjoSetGameActive's mode for a title: system apps, SceShell and VitaShell
+ * (Select starts its FTP server) are not games. The PSP emulator, where
+ * Adrenaline's games run, is one with a static framebuffer; all its games
+ * share its title ID, so one region. */
+static int title_game_mode(const char *tid)
 {
-    /* System apps, SceShell, and VitaShell (Select starts its FTP server). */
-    return !sceClibStrncmp(tid, "NPXS", 4) || !sceClibStrncmp(tid, "main", 4) ||
-           !sceClibStrncmp(tid, "VITASHELL", 9);
+    if (!sceClibStrcmp(tid, "NPXS10028"))
+        return VJO_GAME_STATIC_FB;
+    if (!sceClibStrncmp(tid, "NPXS", 4) || !sceClibStrncmp(tid, "main", 4) ||
+        !sceClibStrncmp(tid, "VITASHELL", 9))
+        return VJO_GAME_NONE;
+    return VJO_GAME;
 }
 
-static void activate_game(SceUID pid, const char *tid)
+static void activate_game(SceUID pid, const char *tid, int mode)
 {
     sceClibSnprintf(title_id, sizeof(title_id), "%s", tid);
     if (mem_uid < 0)
@@ -641,7 +648,7 @@ static void activate_game(SceUID pid, const char *tid)
     push_region();
     backoff_note(&ocr_backoff, 0);
     backoff_note(&dict_backoff, 0);
-    vjoSetGameActive(pid, 1);
+    vjoSetGameActive(pid, mode);
     vjo_log("game %s started: dictionary %s (key %s), trigger %s, subtitles %s, ocr_mode %s", title_id,
             vjo_dict_name(cfg.dictionary), vjo_config_api_key(&cfg)[0] ? "set" : "MISSING",
             vjo_trigger_name(cfg.toggle_button), vjo_trigger_name(cfg.subtitle_button),
@@ -655,15 +662,17 @@ static void classify_pending(void)
     int ret = lookup_title(pid, tid, sizeof(tid));
     if (ret == 0) {
         pending_pid = 0;
-        if (is_excluded_title(tid)) {
-            vjoSetGameActive(pid, 0);
+        int mode = title_game_mode(tid);
+        if (mode == VJO_GAME_NONE) {
+            vjo_log("%s: system app, not a game", tid);
+            vjoSetGameActive(pid, VJO_GAME_NONE);
         } else {
-            activate_game(pid, tid);
+            activate_game(pid, tid, mode);
         }
     } else if (now_us() - pending_since > CLASSIFY_TIMEOUT_US) {
         pending_pid = 0;
         vjo_log("no title ID for 0x%X (0x%08X): treating it as a game", pid, ret);
-        activate_game(pid, "GAME");
+        activate_game(pid, "GAME", VJO_GAME);
     }
 }
 

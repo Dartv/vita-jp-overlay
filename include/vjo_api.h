@@ -5,7 +5,7 @@
 
 #include <stdint.h>
 
-#define VJO_API_VERSION 6
+#define VJO_API_VERSION 7
 
 /* Normalized rectangle, 0..65535 on both axes. w == 0 means full screen. */
 typedef struct {
@@ -64,8 +64,17 @@ typedef struct {
 #define VJO_ERR_BUSY         (-3)
 #define VJO_ERR_TIMEOUT      (-4)
 #define VJO_ERR_FORMAT       (-5)
+#define VJO_ERR_ARG          (-6) /* bad argument */
 #define VJO_ERR_COPY         (-7)
 #define VJO_ERR_PERM         (-8) /* caller is not (or may not be) the registered shell */
+
+/* vjoSetGameActive's mode for the foreground process. */
+enum VjoGameMode {
+    VJO_GAME_NONE = 0,      /* a system app */
+    VJO_GAME = 1,
+    VJO_GAME_STATIC_FB = 2, /* draws into a framebuffer it set once and submits no
+                             * frames (the PSP emulator): sampled from its pad calls */
+};
 
 /* Syscalls exported by VitaJPOverlay_Kernel (library VitaJPOverlayForUser).
  * All return < 0 on error. */
@@ -77,7 +86,7 @@ int vjoWaitEvent(uint32_t mask, uint32_t *out, SceUInt32 timeout_us); /* 0 timeo
 int vjoGetState(VjoState *out);          /* set out->size first */
 int vjoSetRegion(const VjoRect *r);      /* NULL = full screen */
 int vjoSetTriggers(int toggle, int subtitle); /* enum VjoTrigger each, not equal */
-int vjoSetGameActive(int pid, int active); /* shell: pid is a game (1) or a system app (0) */
+int vjoSetGameActive(int pid, int mode);  /* shell: enum VjoGameMode of the foreground process */
 int vjoSetInputBlock(int on);            /* block all game input (not the shell) */
 int vjoPollInput(VjoInput *out);         /* raw pad, unfiltered */
 int vjoRequestCapture(uint32_t flags);   /* VJO_CAPTURE_*; returns seq > 0; raw rows, the shell encodes the JPEG */

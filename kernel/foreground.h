@@ -32,7 +32,7 @@
  * stay dead until the game is suspended and resumed. */
 typedef struct {
     int game_pid;    /* foreground process, 0 = none */
-    int game_active; /* the shell confirmed game_pid is a game */
+    int game_active; /* the shell confirmed game_pid is a game: its VJO_GAME* mode, 0 = not yet */
     int prev;        /* confirmed game behind game_pid, still running; 0 = none */
     int shell_pid;   /* registered SceShell (never becomes the foreground) */
 } VjoForeground;
@@ -41,9 +41,9 @@ typedef struct {
  * IEV_GAME_EXIT | IEV_GAME_START means the foreground went back to prev. */
 uint32_t fg_process_event(VjoForeground *f, int pid, int ev);
 
-/* The shell's verdict on pid. Returns -1 if pid is not the foreground
- * process (state unchanged), else 0 with the IEV_* bits to signal in *iev
- * (IEV_GAME_START: not a game, back to prev). */
-int fg_set_game_active(VjoForeground *f, int pid, int active, uint32_t *iev);
+/* The shell's verdict on pid (mode: enum VjoGameMode). Returns -1 if pid is
+ * not the foreground process (state unchanged), else 0 with the IEV_* bits
+ * to signal in *iev (IEV_GAME_START: not a game, back to prev). */
+int fg_set_game_active(VjoForeground *f, int pid, int mode, uint32_t *iev);
 
 #endif

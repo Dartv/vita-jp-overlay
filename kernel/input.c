@@ -1,7 +1,8 @@
 /* Input: trigger detection (buttons polled from the worker thread, the rear
  * double tap sampled in the game's pad calls), hiding the trigger from the
  * game, blocking all game input while the overlay is open, and the raw pad
- * for the shell (vjoPollInput). */
+ * for the shell (vjoPollInput). The pad calls also sample a static
+ * framebuffer (display.c). */
 #include <psp2kern/ctrl.h>
 #include <psp2kern/kernel/sysclib.h>
 #include <psp2kern/kernel/sysmem.h>
@@ -227,7 +228,9 @@ static void filter_ctrl(int port, SceCtrlData *pad_data, int n, int negative)
     static int name##_patched(int port, SceCtrlData *pad_data, int count)    \
     {                                                                        \
         int ret = TAI_CONTINUE(int, refs[idx], port, pad_data, count);       \
+        /* game context (its pad call): */                                   \
         rear_sample();                                                       \
+        display_static_fb_sample();                                          \
         if (ret > 0)                                                         \
             filter_ctrl(port, pad_data, ret, negative);                            \
         return ret;                                                          \
