@@ -77,6 +77,7 @@ static void on_frame(const GameFb *fb)
 
     if (g.capture_state == CAPTURE_PENDING && capture_claim()) {
         int64_t t0 = ksceKernelGetSystemTimeWide();
+        g.capture_copy_us = t0;
         g.capture_result = capture_copy(fb->base, fb->pitch, fb->fmt, fb->w, fb->h);
         g.capture_state = CAPTURE_COPIED;
         ksceKernelSetEventFlag(g.ievf, IEV_CAPTURED);

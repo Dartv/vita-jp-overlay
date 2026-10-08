@@ -25,6 +25,7 @@ static volatile int worker_run = 1;
 static void reset_change_detection(void)
 {
     scene_reset(&g.tracker);
+    g.region_seq = 0; /* for another region */
     g.seen_sig_seq = g.hook_sig_seq;
 }
 
@@ -32,7 +33,8 @@ static void change_detection(void)
 {
     static SceneSig sig;
     uint32_t seq, id = 0;
-    int settled = 0, animated = 0;
+    SceneEvent ev = SCENE_NONE;
+    int animated = 0;
     if (g.game_pid <= 0 || !g.game_active)
         return;
     VJO_LOCK(); /* against reset_change_detection */
@@ -47,13 +49,16 @@ static void change_detection(void)
             /* the low 32 bits, widened: within the last 71 min */
             int64_t input_us = now - (uint32_t)((uint32_t)now - g.input_us32);
             int64_t edge_us = now - (uint32_t)((uint32_t)now - g.input_edge_us32);
-            settled = scene_update(&g.tracker, &sig, now, input_us, edge_us);
+            ev = scene_update(&g.tracker, &sig, now, input_us, edge_us);
             id = g.tracker.id;
             animated = g.tracker.masked;
         }
     }
     VJO_UNLOCK();
-    if (settled) {
+    if (ev == SCENE_QUIET) {
+        klog("region quiet: scene %u", id);
+        ksceKernelSetEventFlag(g.evf, VJO_EV_REGION_QUIET);
+    } else if (ev == SCENE_SETTLED) {
         klog("region settled: scene %u (%d animated cells masked)", id, animated);
         ksceKernelSetEventFlag(g.evf, VJO_EV_REGION_STABLE);
     }
@@ -69,6 +74,10 @@ static void finish_capture(void)
     }
     g.raw_valid = g.capture_result == 0;
     g.capture_scene = g.raw_valid && !g.capture_full ? scene_match(&g.tracker, &g.capture_sig) : 0;
+    if (g.raw_valid && !g.capture_full) {
+        g.region_seq = g.capture_seq;
+        g.region_us = g.capture_copy_us;
+    }
     g.done_seq = g.capture_seq;
     g.capture_state = CAPTURE_IDLE;
     VJO_UNLOCK();
@@ -282,6 +291,12 @@ int vjoGetState(VjoState *out)
     s.scene = g.tracker.id;
     s.stable = g.tracker.stable;
     s.unsettled_ms = (uint32_t)(scene_unsettled_us(&g.tracker, ksceKernelGetSystemTimeWide()) / 1000);
+    s.quiet = g.tracker.quiet && !g.tracker.stable;
+    /* 0 while a region capture rewrites capture_sig */
+    if (g.region_seq) {
+        s.region_seq = g.region_seq;
+        s.region_scene = scene_match_since(&g.tracker, &g.capture_sig, g.region_us);
+    }
     VJO_UNLOCK();
     s.alloc_status = g.alloc_status;
     s.capture_result = g.capture_result;
@@ -390,6 +405,8 @@ int vjoRequestCapture(uint32_t flags)
         ret = (int)g.capture_seq;
         g.raw_valid = 0;
         g.capture_full = (flags & VJO_CAPTURE_FULL) != 0;
+        if (!g.capture_full)
+            g.region_seq = 0; /* capture_sig gets rewritten */
         g.capture_requested_us = ksceKernelGetSystemTimeWide();
         g.capture_state = CAPTURE_PENDING;
     }

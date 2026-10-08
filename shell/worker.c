@@ -1,24 +1,33 @@
 /* Control thread (kernel events, overlay state, auto/on-press policy) and
  * network thread (capture -> JPEG -> Lens -> dictionary). */
-#include <psp2/appmgr.h>
 #include <psp2/kernel/clib.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 
-#include "../core/jpegsw.h"
 #include "../core/regions.h"
 #include "shell.h"
 
 /* Memory: two result arenas (the overlay shows one while the network thread
- * fills the other) in one memblock allocated while a game runs, plus a small
+ * fills the other) and the network thread's kept connections (Lens and the
+ * dictionary) in one memblock allocated while a game runs, plus a small
  * static scratch arena (control thread only) for config/region/messages. */
 #define RESULT_ARENA_SIZE (384 * 1024)
 #define SCRATCH_SIZE      (24 * 1024)
-#define MEM_SIZE          (2 * RESULT_ARENA_SIZE)
+#define POOL_SLOTS        2 /* Lens and the dictionary */
+#define POOL_SIZE         ((vjo_net_pool_size(POOL_SLOTS) + 15) & ~(size_t)15)
+#define MEM_SIZE          (2 * RESULT_ARENA_SIZE + POOL_SIZE)
+/* Well within the servers' (jiten closes an idle connection after 3
+ * minutes, Lens after 4), and short enough that one a network dropped
+ * silently (a hotspot's NAT) is rarely met: that costs a read timeout. */
+#define NET_IDLE_US       (60 * 1000 * 1000)
+/* Connections are readied when the region starts changing (for this long),
+ * this often at most: a region that never settles readies them once. */
+#define WARM_WINDOW_MS    3000u
+#define WARM_GAP_US       2000000LL
+#define WARM_CONNECT_US   5000000
 
 #define POLL_TIMEOUT_US   50000
-#define CAPTURE_TIMEOUT_US 3000000
 #define BACKOFF_MIN_US    2000000LL
 #define BACKOFF_MAX_US    60000000LL
 #define JPEG_QUALITY      80
@@ -29,7 +38,6 @@ VjoView g_view;
 
 static SceUID view_lock = -1;
 static SceUID cmd_lock = -1;
-static SceUID capture_lock = -1; /* the kernel's one raw buffer: OCR job vs Anki screenshot */
 static SceUID ctl_thread = -1, net_thread = -1;
 static int threads_started;
 static int anki_started; /* optional: the overlay runs without it */
@@ -42,6 +50,7 @@ static VjoArena scratch; /* static; control thread only */
 static uint8_t scratch_mem[SCRATCH_SIZE];
 static int active = -1;               /* results[] index shown/cached */
 static uint32_t cache_scene; /* VjoState.scene of the cached result, 0 = unknown */
+static uint32_t cache_seq;   /* VjoState.region_seq of its capture */
 static int cache_ok;
 static int cache_dictionary; /* the cached lookup's VJO_DICT_* */
 static VjoOverlayData cache_data[2];
@@ -49,6 +58,7 @@ static VjoOverlayData cache_data[2];
 static VjoConfig cfg;      /* control thread */
 static VjoConfig job_cfg;  /* snapshot used by the network thread */
 static VjoPlatform plat;
+static VjoNetPool pool; /* plat's; network thread only, except mem_free while it idles */
 static char title_id[12];   /* set while a game is active ("" otherwise) */
 
 /* Control-thread state. The overlay and the network job are independent: an
@@ -62,13 +72,18 @@ static char title_id[12];   /* set while a game is active ("" otherwise) */
  *   subtitles: on/off (the strip shows each job's sentence while the
  *            overlay is closed)
  * plus inputs to the background policy: stable_pending (a REGION_STABLE
- * that has not been acted on yet) and the error backoffs, one per stage (a
+ * or REGION_QUIET not acted on yet) and the error backoffs, one per stage (a
  * failing dictionary does not stop the subtitles, which need only OCR).
  * Each event has one handler below (on_*). */
 enum { OV_CLOSED, OV_OPEN, OV_OPEN_OLD_JOB };
 static int ov = OV_CLOSED;
 static int subtitles; /* written by set_subtitles only */
 static int stable_pending;
+/* The overlay waits for the running job ("Recognizing…"), or shows its
+ * sentence before the lookup: job_text_list, in the job's arena, which
+ * must not be shown once another job starts in it. */
+static int view_waiting, view_job_text;
+static VjoEntryList job_text_list;
 typedef struct {
     int64_t until, us;
 } Backoff;
@@ -78,11 +93,11 @@ static int64_t job_started_us;
 /* network job */
 #define NET_EV_JOB  1u
 #define NET_EV_QUIT 2u
+#define NET_EV_WARM 4u
 static volatile int job_running;
 static volatile int job_done;
 static volatile int job_idx;
 static volatile int job_rc;
-static volatile uint32_t job_scene;
 static volatile int job_lookup;     /* the job looks the words up (else OCR only) */
 /* The cached result's text when the job started (NULL: no usable lookup).
  * Its arena is not touched while the job runs (the job fills the other). */
@@ -90,6 +105,19 @@ static const char *job_cached_text;
 /* The job's text is job_cached_text: no lookup, the cached result stays
  * (and is now for the job's screen). */
 static volatile int job_same_text;
+/* The job's capture is done (job_capture_scene, job_capture_seq: its
+ * VjoState.capture_scene and region_seq). */
+static volatile int job_captured;
+static volatile uint32_t job_capture_scene, job_capture_seq;
+/* The job is for an earlier screen: its requests were aborted, its result
+ * is dropped. */
+static volatile int job_cancelled;
+static VjoNetCancel net_cancel = {-1, -1, 0}; /* the network thread's requests */
+/* The network thread opens the connections for the next job (warm_dictionary:
+ * VJO_DICT_*, or -1 for Lens only). */
+static volatile int warm_running;
+static volatile int warm_dictionary;
+static int64_t warm_asked_us;
 /* cache_data[job_idx].sentence is ready (the lookup may still run): the
  * net thread only appends to the arena, so the control thread may read it */
 static volatile int job_text_ready;
@@ -127,6 +155,16 @@ static int same_scene(uint32_t a, uint32_t b)
     return a != 0 && a == b;
 }
 
+/* Does a result for `scene`, from region capture `seq`, show the screen in
+ * st? Its scene is the current one, or its capture still shows the screen
+ * (checked now): an icon that kept changing when it was taken got masked
+ * since, or is all that changes. */
+static int shows_screen(uint32_t scene, uint32_t seq, const VjoState *st)
+{
+    return same_scene(scene, st->scene) ||
+           (seq && seq == st->region_seq && same_scene(st->region_scene, st->scene));
+}
+
 /* ---------------- memory ---------------- */
 
 static int mem_alloc(void)
@@ -145,17 +183,21 @@ static int mem_alloc(void)
     p = (uint8_t *)base;
     vjo_arena_init(&results[0], p, RESULT_ARENA_SIZE);
     vjo_arena_init(&results[1], p + RESULT_ARENA_SIZE, RESULT_ARENA_SIZE);
+    vjo_net_pool_init(&pool, p + 2 * RESULT_ARENA_SIZE, POOL_SIZE, NET_IDLE_US);
     active = -1;
     cache_ok = 0;
     return 0;
 }
 
+/* Not while the network thread works (net_busy). */
 static void mem_free(void)
 {
     if (mem_uid >= 0) {
         vjo_view_lock();
         g_view.list = NULL;
         vjo_view_unlock();
+        vjo_net_pool_close(&plat);
+        vjo_net_pool_init(&pool, NULL, 0, NET_IDLE_US);
         sceKernelFreeMemBlock(mem_uid);
     }
     mem_uid = -1;
@@ -187,6 +229,7 @@ static void view_publish(int open, const VjoEntryList *list, const char *status,
 
 static void view_show_cache(void)
 {
+    view_waiting = view_job_text = 0;
     VjoOverlayData *d = &cache_data[active];
     size_t mark = vjo_arena_mark(&scratch);
     const char *err = d->err.rc ? vjo_err_text(&scratch, d->failed_stage, &d->err) : NULL;
@@ -240,59 +283,7 @@ static int mem_jpeg_read(void *ud, uint32_t off, void *dst, uint32_t len)
     return 0;
 }
 
-static int raw_rows(void *ud, uint32_t row, uint32_t n, uint8_t *dst)
-{
-    (void)ud;
-    return vjoReadRaw(row, n, dst);
-}
-
-int vjo_capture_jpeg(VjoArena *a, uint32_t flags, int quality, VjoBuf *out, VjoState *st)
-{
-    int seq, rc = VJO_OK;
-    int64_t deadline, t0;
-
-    /* Held until the last row is read: another request would invalidate them. */
-    sceKernelLockMutex(capture_lock, 1, NULL);
-    seq = vjoRequestCapture(flags);
-    if (seq < 0) {
-        vjo_log("capture request failed %d", seq);
-        rc = seq == VJO_ERR_NO_MEMORY ? VJO_E_OOM : VJO_E_SOURCE;
-        goto out;
-    }
-    /* CAPTURE_DONE may be left over from an earlier capture: the sequence
-     * number decides which capture finished. */
-    deadline = now_us() + CAPTURE_TIMEOUT_US;
-    for (;;) {
-        uint32_t bits = 0;
-        st->size = sizeof(*st);
-        vjoGetState(st);
-        if (st->done_seq == (uint32_t)seq)
-            break;
-        if (now_us() >= deadline) {
-            vjo_log("capture %d timed out", seq);
-            rc = VJO_E_SOURCE;
-            goto out;
-        }
-        vjoWaitEvent(VJO_EV_CAPTURE_DONE, &bits, 100000);
-    }
-    if (st->capture_result != 0) {
-        vjo_log("capture failed %d", st->capture_result);
-        rc = st->capture_result == VJO_ERR_NO_MEMORY ? VJO_E_OOM : VJO_E_SOURCE;
-        goto out;
-    }
-    t0 = now_us();
-    if (vjo_jpeg_encode(a, st->width, st->height, st->raw_stride, raw_rows, NULL, quality, out) < 0) {
-        rc = out->oom ? VJO_E_OOM : VJO_E_SOURCE;
-        goto out;
-    }
-    vjo_log("JPEG %ux%u -> %u bytes in %d ms", st->width, st->height, (unsigned)out->len,
-            (int)((now_us() - t0) / 1000));
-out:
-    sceKernelUnlockMutex(capture_lock, 1);
-    return rc;
-}
-
-static int run_job(VjoArena *a, VjoOverlayData *out, uint32_t *scene)
+static int run_job(VjoArena *a, VjoOverlayData *out)
 {
     VjoState st;
     VjoJpegSource src;
@@ -307,7 +298,10 @@ static int run_job(VjoArena *a, VjoOverlayData *out, uint32_t *scene)
         out->failed_stage = VJO_STAGE_OCR;
         return out->err.rc;
     }
-    *scene = st.capture_scene;
+    job_capture_scene = st.capture_scene;
+    job_capture_seq = st.region_seq;
+    __sync_synchronize(); /* the scene is visible before job_captured */
+    job_captured = 1;
     sceClibMemset(&src, 0, sizeof(src));
     src.width = st.width;
     src.height = st.height;
@@ -331,17 +325,21 @@ static int net_main(SceSize args, void *argp)
     (void)argp;
     while (running) {
         unsigned int bits = 0;
-        sceKernelWaitEventFlag(net_evf, NET_EV_JOB | NET_EV_QUIT, SCE_EVENT_WAITOR | SCE_EVENT_WAITCLEAR_PAT,
-                               &bits, NULL);
+        sceKernelWaitEventFlag(net_evf, NET_EV_JOB | NET_EV_WARM | NET_EV_QUIT,
+                               SCE_EVENT_WAITOR | SCE_EVENT_WAITCLEAR_PAT, &bits, NULL);
         if (bits & NET_EV_QUIT)
             break;
+        if ((bits & NET_EV_WARM) && !(bits & NET_EV_JOB)) /* a job opens them itself */
+            vjo_overlay_warm(&plat, warm_dictionary, WARM_CONNECT_US);
+        if (bits & NET_EV_WARM) {
+            __sync_synchronize();
+            warm_running = 0;
+        }
         if (bits & NET_EV_JOB) {
             int idx = job_idx;
-            uint32_t scene = 0;
             int64_t t0 = now_us();
             vjo_arena_reset(&results[idx]);
-            job_rc = run_job(&results[idx], &cache_data[idx], &scene);
-            job_scene = scene;
+            job_rc = run_job(&results[idx], &cache_data[idx]);
             vjo_log("job %d done rc=%d in %d ms, arena peak %u", idx, job_rc,
                     (int)((now_us() - t0) / 1000), (unsigned)results[idx].peak);
             __sync_synchronize(); /* results are visible before job_done */
@@ -349,6 +347,13 @@ static int net_main(SceSize args, void *argp)
         }
     }
     return 0;
+}
+
+/* The network thread is at work (its memory must stay). */
+static int net_busy(void)
+{
+    __sync_synchronize();
+    return job_running || warm_running;
 }
 
 /* lookup = 0: OCR only (the subtitles' sentence). */
@@ -362,6 +367,15 @@ static void start_job(const char *why, int lookup)
     job_cfg = cfg; /* the control thread may reload cfg while the job runs */
     job_cached_text = cache_ok && cache_dictionary == cfg.dictionary ? cache_data[active].filtered : NULL;
     job_same_text = 0;
+    job_captured = 0;
+    job_capture_scene = 0;
+    job_capture_seq = 0;
+    job_cancelled = 0;
+    vjo_net_cancel_clear(&net_cancel);
+    if (view_job_text) { /* its arena may be the new job's */
+        view_job_text = 0;
+        view_publish(1, NULL, "Recognizing…", 0);
+    }
     job_done = 0;
     job_text_ready = 0;
     job_running = 1;
@@ -399,6 +413,35 @@ static int game_active(void)
     return title_id[0] != '\0';
 }
 
+/* The running job captured another screen than the one settled now: it is
+ * abandoned (Lens and the dictionary take seconds), so the job for this
+ * screen can start at once. Returns 1 if it was. */
+static int cancel_outdated_job(const VjoState *st)
+{
+    __sync_synchronize(); /* pairs with the network thread's barrier */
+    if (!job_running || job_cancelled || !job_captured || !(st->stable || st->quiet) ||
+        shows_screen(job_capture_scene, job_capture_seq, st))
+        return 0;
+    job_cancelled = 1;
+    vjo_net_cancel(&net_cancel);
+    vjo_log("job cancelled: the screen changed since its capture");
+    return 1;
+}
+
+/* Is the cached result for the screen in st? If so it is retagged with
+ * st's scene, which stays valid through later captures. */
+static int claim_cache_for(const VjoState *st)
+{
+    if (!cache_ok || active < 0 || !shows_screen(cache_scene, cache_seq, st))
+        return 0;
+    if (cache_scene != st->scene) {
+        vjo_view_lock();
+        cache_scene = st->scene;
+        vjo_view_unlock();
+    }
+    return 1;
+}
+
 static void open_overlay(void)
 {
     VjoState st;
@@ -422,23 +465,26 @@ static void open_overlay(void)
         view_publish(1, NULL, "Not enough memory to capture the screen", 1);
         return;
     }
-    if (cfg.ocr_mode == VJO_OCR_AUTO && cache_ok && active >= 0 && same_scene(cache_scene, st.scene)) {
+    if (cfg.ocr_mode == VJO_OCR_AUTO && claim_cache_for(&st)) {
         vjo_log("open: background result");
         view_show_cache();
         return;
     }
     /* Why the background result can't be used (auto mode tuning). */
     if (cfg.ocr_mode == VJO_OCR_AUTO)
-        vjo_log("open: %s (stable %u)",
+        vjo_log("open: %s (stable %u, quiet %u)",
                 job_running ? "background job still running"
                 : !cache_ok || active < 0 ? "no background result"
                                           : "screen changed since the background result",
-                st.stable);
+                st.stable, st.quiet);
     view_publish(1, NULL, "Recognizing…", 0);
-    if (job_running)
-        ov = OV_OPEN_OLD_JOB;
-    else
+    view_waiting = 1;
+    if (job_running) {
+        ov = OV_OPEN_OLD_JOB; /* a cancelled one is followed by a new one */
+        cancel_outdated_job(&st);
+    } else {
         start_job("overlay opened", 1);
+    }
 }
 
 static void close_overlay(void)
@@ -446,6 +492,7 @@ static void close_overlay(void)
     if (ov == OV_CLOSED)
         return;
     ov = OV_CLOSED;
+    view_waiting = view_job_text = 0;
     vjoSetInputBlock(0);
     vjo_view_lock();
     __atomic_store_n(&g_view.open, 0, __ATOMIC_RELEASE);
@@ -489,7 +536,7 @@ static int restart_old_job(int has_lookup)
     ov = OV_OPEN;
     st.size = sizeof(st);
     vjoGetState(&st);
-    if (same_scene(job_scene, st.scene) && has_lookup)
+    if (shows_screen(job_capture_scene, job_capture_seq, &st) && has_lookup)
         return 0;
     start_job(has_lookup ? "result was for an earlier screen" : "the running job was OCR only", 1);
     return 1;
@@ -504,6 +551,18 @@ static void on_job_done(void)
     job_running = 0;
     job_done = 0;
     job_text_ready = 0;
+    if (job_cancelled) {
+        job_cancelled = 0;
+        if (ov != OV_CLOSED) { /* the overlay waits for this screen's */
+            ov = OV_OPEN;
+            start_job("the screen changed during the last one", 1);
+        } else {
+            stable_pending = 1; /* auto_prefetch: the screen settled now */
+            if (subtitles)
+                strip_publish(NULL, 0, 0);
+        }
+        return;
+    }
     ocr_failed = d->failed_stage == VJO_STAGE_OCR;
     backoff_note(&ocr_backoff, ocr_failed);
     if (subtitles)
@@ -515,7 +574,8 @@ static void on_job_done(void)
         vjo_log("same text as the cached result: kept for this screen");
         vjo_view_lock();
         cache_ok = 1;
-        cache_scene = job_scene;
+        cache_scene = job_capture_scene;
+        cache_seq = job_capture_seq;
         vjo_view_unlock();
         if (ov == OV_OPEN && !job_lookup)
             return; /* OCR only: the overlay already shows a result */
@@ -535,7 +595,8 @@ static void on_job_done(void)
     active = idx;
     cache_ok = d->err.rc == VJO_OK && job_lookup; /* the overlay needs the lookup */
     cache_dictionary = job_cfg.dictionary;
-    cache_scene = job_scene;
+    cache_scene = job_capture_scene;
+    cache_seq = job_capture_seq;
     vjo_view_unlock();
     if (!restart_old_job(job_lookup) && ov != OV_CLOSED)
         view_show_cache();
@@ -556,9 +617,25 @@ static void on_job_text(void)
     __sync_synchronize(); /* pairs with the network thread's barrier */
     sentence = cache_data[job_idx].sentence;
     job_text_ready = 0;
+    if (job_cancelled)
+        return; /* for an earlier screen */
     vjo_log("subtitle text ready in %d ms", (int)((now_us() - job_started_us) / 1000));
     if (subtitles && sentence)
         strip_publish(sentence, VJO_STRIP_SENTENCE, 1);
+    /* The overlay waits for this job: the sentence now, the words after
+     * the lookup (if the job is for the screen shown). */
+    if (ov != OV_CLOSED && view_waiting && job_lookup && !job_same_text && sentence) {
+        VjoState st;
+        st.size = sizeof(st);
+        vjoGetState(&st);
+        if (shows_screen(job_capture_scene, job_capture_seq, &st)) {
+            job_text_list.header = sentence;
+            job_text_list.entries = NULL;
+            job_text_list.n_entries = 0;
+            view_publish(1, &job_text_list, "Looking up words…", 0);
+            view_job_text = 1;
+        }
+    }
 }
 
 static void set_subtitles(int on)
@@ -582,7 +659,7 @@ static void set_subtitles(int on)
         strip_publish("Not enough memory to capture the screen", VJO_STRIP_ERROR, 0);
         return;
     }
-    if (!job_running && d && d->sentence && same_scene(cache_scene, st.scene)) {
+    if (!job_running && d && d->sentence && shows_screen(cache_scene, cache_seq, &st)) {
         strip_publish(d->sentence, VJO_STRIP_SENTENCE, 0);
         return;
     }
@@ -648,36 +725,6 @@ static void on_command(void)
 static SceUID pending_pid;
 static int64_t pending_since;
 
-int sceKernelGetProcessTitleId(SceUID pid, char *titleid, SceSize len); /* SceProcessmgr, not in headers */
-
-static int lookup_title(SceUID pid, char *tid, int size)
-{
-    int ret;
-    sceClibMemset(tid, 0, size);
-    ret = sceKernelGetProcessTitleId(pid, tid, size);
-    if (ret >= 0 && tid[0])
-        return 0;
-    sceClibMemset(tid, 0, size);
-    ret = sceAppMgrAppParamGetString(pid, 12, tid, size); /* 12 = title ID */
-    if (ret >= 0 && tid[0])
-        return 0;
-    return ret < 0 ? ret : -1;
-}
-
-/* vjoSetGameActive's mode for a title: system apps, SceShell and VitaShell
- * (Select starts its FTP server) are not games. The PSP emulator, where
- * Adrenaline's games run, is one with a static framebuffer; all its games
- * share its title ID, so one region. */
-static int title_game_mode(const char *tid)
-{
-    if (!sceClibStrcmp(tid, "NPXS10028"))
-        return VJO_GAME_STATIC_FB;
-    if (!sceClibStrncmp(tid, "NPXS", 4) || !sceClibStrncmp(tid, "main", 4) ||
-        !sceClibStrncmp(tid, "VITASHELL", 9))
-        return VJO_GAME_NONE;
-    return VJO_GAME;
-}
-
 static void activate_game(SceUID pid, const char *tid, int mode)
 {
     sceClibSnprintf(title_id, sizeof(title_id), "%s", tid);
@@ -698,10 +745,10 @@ static void classify_pending(void)
 {
     char tid[32];
     SceUID pid = pending_pid;
-    int ret = lookup_title(pid, tid, sizeof(tid));
+    int ret = vjo_title_id(pid, tid, sizeof(tid));
     if (ret == 0) {
         pending_pid = 0;
-        int mode = title_game_mode(tid);
+        int mode = vjo_title_game_mode(tid);
         if (mode == VJO_GAME_NONE) {
             vjo_log("%s: system app, not a game", tid);
             vjoSetGameActive(pid, VJO_GAME_NONE);
@@ -722,7 +769,7 @@ static void on_game_exit(void)
     if (subtitles)
         set_subtitles(0);
     /* Free memory unless the network thread still uses it. */
-    if (!job_running)
+    if (!net_busy())
         mem_free();
     title_id[0] = '\0';
 }
@@ -779,11 +826,35 @@ static void auto_prefetch(void)
     vjoGetState(&st);
     if (stable_pending) {
         stable_pending = 0;
-        if (st.stable && !(cache_ok && same_scene(cache_scene, st.scene)))
-            start_job("auto: screen settled", want_lookup());
+        if ((st.stable || st.quiet) && !claim_cache_for(&st))
+            start_job(st.stable ? "auto: screen settled" : "auto: screen quiet", want_lookup());
     } else if (st.unsettled_ms >= UNSETTLED_US / 1000) {
         start_job("subtitles: screen keeps changing", 0); /* no lookup every 2 s */
     }
+}
+
+/* When the region starts changing, the network thread readies the next
+ * job's connections (keeping usable ones), so its requests skip the
+ * handshakes. */
+static void warm_connections(void)
+{
+    VjoState st;
+    int lookup;
+    if (!game_active() || mem_uid < 0 || net_busy() || now_us() - warm_asked_us < WARM_GAP_US)
+        return;
+    lookup = vjo_config_api_key(&cfg)[0] != '\0';
+    if (!lookup && !subtitles)
+        return;
+    st.size = sizeof(st);
+    vjoGetState(&st);
+    if (!st.unsettled_ms || st.unsettled_ms > WARM_WINDOW_MS)
+        return;
+    warm_asked_us = now_us();
+    warm_dictionary = lookup ? cfg.dictionary : -1;
+    vjo_net_cancel_clear(&net_cancel);
+    warm_running = 1;
+    __sync_synchronize();
+    sceKernelSetEventFlag(net_evf, NET_EV_WARM);
 }
 
 static int ctl_main(SceSize args, void *argp)
@@ -795,8 +866,8 @@ static int ctl_main(SceSize args, void *argp)
      * (e.g. a trigger and a game start in the same wakeup). */
     while (running) {
         uint32_t bits = 0;
-        vjoWaitEvent(VJO_EV_TRIGGER | VJO_EV_SUBTITLE | VJO_EV_REGION_STABLE | VJO_EV_GAME_START |
-                         VJO_EV_GAME_EXIT,
+        vjoWaitEvent(VJO_EV_TRIGGER | VJO_EV_SUBTITLE | VJO_EV_REGION_STABLE | VJO_EV_REGION_QUIET |
+                         VJO_EV_GAME_START | VJO_EV_GAME_EXIT,
                      &bits, POLL_TIMEOUT_US);
 
         if (bits & VJO_EV_GAME_EXIT)
@@ -815,10 +886,18 @@ static int ctl_main(SceSize args, void *argp)
             on_job_done();
         if (pending_cmd != VJO_CMD_NONE)
             on_command();
-        if (bits & VJO_EV_REGION_STABLE)
+        if (bits & (VJO_EV_REGION_STABLE | VJO_EV_REGION_QUIET)) {
             stable_pending = 1;
+            if (job_running) {
+                VjoState st;
+                st.size = sizeof(st);
+                vjoGetState(&st);
+                cancel_outdated_job(&st);
+            }
+        }
         auto_prefetch();
-        if (!game_active() && !job_running && mem_uid >= 0 && ov == OV_CLOSED)
+        warm_connections();
+        if (!game_active() && !net_busy() && mem_uid >= 0 && ov == OV_CLOSED)
             mem_free();
     }
     return 0;
@@ -838,16 +917,16 @@ int vjo_worker_start(void)
     }
     view_lock = sceKernelCreateMutex("VjoView", 0, 0, NULL);
     cmd_lock = sceKernelCreateMutex("VjoCmd", 0, 0, NULL);
-    capture_lock = sceKernelCreateMutex("VjoCapture", 0, 0, NULL);
     net_evf = sceKernelCreateEventFlag("VjoNetEv", 0, 0, NULL);
-    if (view_lock < 0 || cmd_lock < 0 || capture_lock < 0 || net_evf < 0) {
+    if (view_lock < 0 || cmd_lock < 0 || vjo_capture_init() < 0 || net_evf < 0 || vjo_net_cancel_init(&net_cancel) < 0) {
         vjo_worker_stop();
         return -1;
     }
     anki_started = vjo_anki_start() == 0;
     if (!anki_started)
         vjo_log("anki: thread failed to start: Anki is off");
-    vjo_platform_vita(&plat);
+    vjo_platform_vita(&plat, &net_cancel);
+    plat.pool = &pool; /* no slots until mem_alloc */
     vjo_arena_init(&scratch, scratch_mem, sizeof(scratch_mem));
     vjo_arena_init(&results[0], NULL, 0);
     vjo_arena_init(&results[1], NULL, 0);
@@ -870,6 +949,8 @@ int vjo_worker_start(void)
 void vjo_worker_stop(void)
 {
     running = 0;
+    if (net_cancel.lock >= 0)
+        vjo_net_cancel(&net_cancel); /* a request in progress ends now */
     if (net_evf >= 0)
         sceKernelSetEventFlag(net_evf, NET_EV_QUIT);
     if (threads_started) {
@@ -889,9 +970,10 @@ void vjo_worker_stop(void)
         sceKernelDeleteEventFlag(net_evf);
     if (cmd_lock >= 0)
         sceKernelDeleteMutex(cmd_lock);
-    if (capture_lock >= 0)
-        sceKernelDeleteMutex(capture_lock);
+    vjo_capture_fini();
     if (view_lock >= 0)
         sceKernelDeleteMutex(view_lock);
-    net_evf = cmd_lock = capture_lock = view_lock = -1;
+    if (net_cancel.lock >= 0)
+        sceKernelDeleteMutex(net_cancel.lock);
+    net_evf = cmd_lock = view_lock = net_cancel.lock = -1;
 }

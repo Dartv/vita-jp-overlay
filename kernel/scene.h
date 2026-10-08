@@ -6,8 +6,8 @@
  * so any change in a cell's sampled pixels is seen, and any cell that
  * differs from the screen's first frame makes a new screen, except:
  *
- * A cell that keeps cycling through a few states (SCENE_ANIM_REVISITS
- * changes in a row back to a recent state) for SCENE_ANIM_SPAN_US, with no
+ * A cell that keeps cycling through a few states (mostly changes back to a
+ * recent state: a score of SCENE_ANIM_REVISITS) for SCENE_ANIM_SPAN_US, no
  * pause longer than SCENE_ANIM_GAP_US and no player input, is animated: a
  * blinking or bobbing "next" icon, an AUTO mark, a sparkle. A change within
  * SCENE_INPUT_US of input (a button, a stick, a touch the game read) is the
@@ -27,23 +27,38 @@
  * masked like an icon, until SCENE_ANIM_GAP_US after it stops.
  * At most SCENE_ANIM_MAX cells are masked: an animated background masks
  * none. While any cell is masked and SCENE_ANIM_WARM_US after, any cell is
- * masked once it has cycled SCENE_WARM_REVISITS times, without waiting for
+ * masked once its score reaches SCENE_WARM_REVISITS, without waiting for
  * SCENE_ANIM_SPAN_US (the icon of the next line, wherever that line ends;
  * a short line fading out to an empty box can be taken for one meanwhile).
  * A cell next to an animated one that goes back to a recent state without
  * input is masked with it, for as long as that one is: the edge of the
  * icon, reached by its largest frames only (at most SCENE_ANIM_MAX more).
  *
- * A mask ends SCENE_ANIM_GAP_US after the cell stops, or when it shows a
- * state that is not among its last SCENE_HISTORY (new content), and that
- * is a change: whatever the mask hid is not taken as the screen after that.
+ * A mask ends SCENE_ANIM_GAP_US after the cell stops (the icon's, for an
+ * edge), at an input edge, or once an icon cell holds a state it had not
+ * shown before for SCENE_STABLE_US (new content; while it keeps changing,
+ * such states are taken as frames of the animation: one read while the
+ * game draws it, or sampled for the first time). That is a change:
+ * whatever the mask hid is not taken as the screen after that. New
+ * content in an edge cell, or in an icon cell that keeps changing, is
+ * seen only then.
  *
  * Settling waits while an icon cycles before it is masked: a screen with a
  * blinking icon settles when the icon first appears (a new state) and
  * again about SCENE_ANIM_SPAN_US later, once it is masked; with a recent
  * mask, once. A single icon-sized revert (A, B, A) without input also
  * waits up to SCENE_ANIM_GAP_US; a line replaced by a shorter one does
- * not. */
+ * not.
+ *
+ * Quiet: before that, once every change for SCENE_QUIET_US has stayed in
+ * one spot of SCENE_SPOT x SCENE_SPOT cells, and the spot went back to a
+ * recent state (an icon not masked yet; text being typed moves on, and
+ * only to new states), the screen is quiet: worth capturing. A
+ * capture taken since the spot started differs from the screen in the
+ * spot only, so it shows the screen with the spot left aside
+ * (scene_match_since), until something changes outside the spot, a mask
+ * ends or an input edge. A spot that changes to new content in place (a
+ * one-character counter) is taken for the icon meanwhile. */
 #ifndef VJO_SCENE_H
 #define VJO_SCENE_H
 
@@ -51,15 +66,17 @@
 
 #define SCENE_CELLS         128
 #define SCENE_HISTORY       16      /* recent states per cell (an icon's frames) */
-#define SCENE_ANIM_REVISITS 2       /* changes back to a recent state, in a row */
+#define SCENE_ANIM_REVISITS 2       /* revisit score (track() in scene.c) */
 #define SCENE_ANIM_SPAN_US  2000000 /* cycling this long = animated */
 #define SCENE_ANIM_GAP_US   1500000 /* a longer pause ends the run (a slow blink fits) */
-#define SCENE_ANIM_WARM_US  5000000 /* a mask this recently: cycling cells masked sooner, */
-#define SCENE_WARM_REVISITS 4       /* after this many revisits in a row */
+#define SCENE_ANIM_WARM_US  10000000 /* a mask this recently: cycling cells masked sooner, */
+#define SCENE_WARM_REVISITS 4       /* at this revisit score */
 #define SCENE_ANIM_MAX      8       /* animated cells masked at most */
 #define SCENE_INPUT_US      500000  /* changes this soon after input are the player's */
 #define SCENE_ICON          2       /* an icon-sized change fits in 2x2 cells */
 #define SCENE_STABLE_US     300000  /* no change this long = settled */
+#define SCENE_SPOT          3       /* quiet: changes in a spot this many cells wide and tall */
+#define SCENE_QUIET_US      400000  /* for this long */
 
 typedef struct {
     uint32_t w, h; /* the region size it was built for; 0 = none */
@@ -97,7 +114,8 @@ typedef struct {
     int seen;                     /* last is set */
     uint32_t hist[SCENE_HISTORY]; /* recent distinct states, a ring */
     int n, next;
-    int revisits;                 /* changes back to a recent state, in a row */
+    int revisits;                 /* score of changes back to a recent state */
+    int fresh;                    /* the last change was to a new state */
     int64_t run_start_us;         /* first change of the current run of changes */
     int64_t moved_us;             /* last change */
     int masked;                   /* SCENE_MASK_*: ignored (as of the last signature) */
@@ -116,18 +134,27 @@ typedef struct {
     int icon_change;       /* the last change was icon-sized */
     int64_t edge_us;       /* the last input edge seen */
     int64_t masked_us;     /* a cell was masked (warm for SCENE_ANIM_WARM_US); 0 = never */
+    uint8_t spot[SCENE_CELLS]; /* cells changed since spot_us */
+    int64_t spot_us;       /* every change since fits in one spot; 0 = none */
+    int spot_cycles;       /* a spot cell went back to a recent state */
+    int quiet;             /* the spot has been cycling for SCENE_QUIET_US */
 } SceneTracker;
 
 /* Forget the screen (new game or region); keeps the numbering. */
 void scene_reset(SceneTracker *t);
 
+/* scene_update's result */
+typedef enum { SCENE_NONE = 0, SCENE_SETTLED, SCENE_QUIET } SceneEvent;
+
 /* One signature from the display hook; input_us: the last player input,
- * edge_us: the last press, release or touch. Returns 1 when the screen
- * settles. */
-int scene_update(SceneTracker *t, const SceneSig *sig, int64_t now, int64_t input_us, int64_t edge_us);
+ * edge_us: the last press, release or touch. Returns what the screen did. */
+SceneEvent scene_update(SceneTracker *t, const SceneSig *sig, int64_t now, int64_t input_us, int64_t edge_us);
 
 /* t->id if sig shows the current screen (masked cells aside), else 0. */
 uint32_t scene_match(const SceneTracker *t, const SceneSig *sig);
+/* The same for a sig of a frame from sig_us on: while quiet, one taken
+ * since the spot started may differ in the spot too. */
+uint32_t scene_match_since(const SceneTracker *t, const SceneSig *sig, int64_t sig_us);
 
 /* How long the region has been changing without settling (0 = settled). */
 int64_t scene_unsettled_us(const SceneTracker *t, int64_t now);

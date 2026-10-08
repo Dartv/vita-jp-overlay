@@ -95,11 +95,13 @@ static int in_history(const SceneCell *c, uint32_t hash)
 }
 
 /* Records the cell's state. A change extends its run of changes (or starts
- * a new one after a pause longer than SCENE_ANIM_GAP_US) and counts the
- * revisits in a row: changes back to a state among the last few. A change
- * the player caused (by_input) starts a new run, so it never makes a cell
- * animated; a masked icon keeps cycling through held input (its mask ends
- * at an input edge: unmask_on_edge). */
+ * a new one after a pause longer than SCENE_ANIM_GAP_US) and scores the
+ * revisits: +1 for a change back to a state among the last few, -1 for a
+ * new state (an icon read while the game draws it shows one now and then;
+ * text being typed shows nothing but). A change the player caused
+ * (by_input) starts a new run at 0, so it never makes a cell animated; a
+ * masked icon keeps cycling through held input (its mask ends at an input
+ * edge: unmask_on_edge). */
 static void track(SceneCell *c, uint32_t hash, int64_t now, int by_input)
 {
     int revisit;
@@ -120,7 +122,13 @@ static void track(SceneCell *c, uint32_t hash, int64_t now, int by_input)
         c->revisits = 0;
     }
     revisit = in_history(c, hash);
-    c->revisits = revisit && !by_input ? c->revisits + 1 : 0;
+    if (by_input)
+        c->revisits = 0;
+    else if (revisit)
+        c->revisits++;
+    else if (c->revisits > 0)
+        c->revisits--;
+    c->fresh = !revisit;
     if (!revisit) {
         c->hist[c->next] = hash;
         c->next = (c->next + 1) % SCENE_HISTORY;
@@ -141,21 +149,37 @@ static int cycling(const SceneCell *c, int64_t now)
     return running(c, now) && c->revisits >= SCENE_ANIM_REVISITS;
 }
 
-/* Cycling for SCENE_ANIM_SPAN_US, or for SCENE_WARM_REVISITS revisits in
- * a row while warm: the "next" icon of the next line, wherever it ends.
- * More revisits than SCENE_ANIM_REVISITS: a cell of text being typed can
- * sample like its empty state twice in a row. A masked cell stays animated
- * while it cycles; a state not among its last SCENE_HISTORY is new
- * content, which ends the mask. */
+/* Cycling for SCENE_ANIM_SPAN_US, or to a score of SCENE_WARM_REVISITS
+ * while warm: the "next" icon of the next line, wherever it ends. More
+ * than SCENE_ANIM_REVISITS: a cell of text being typed can sample like its
+ * empty state twice.
+ * A masked icon cell stays animated while it keeps changing, through
+ * states it has not shown before (a frame read while the game draws it,
+ * one sampled for the first time); one it then holds for SCENE_STABLE_US
+ * is new content, which ends the mask. */
 static int animated(const SceneTracker *t, const SceneCell *c, int64_t now)
 {
     int warm = t->masked_us && now - t->masked_us <= SCENE_ANIM_WARM_US;
+    if (c->fresh && now - c->moved_us >= SCENE_STABLE_US)
+        return 0; /* holds something new */
+    if (c->masked == SCENE_MASK_ICON && running(c, now))
+        return 1;
     return cycling(c, now) && (c->moved_us - c->run_start_us >= SCENE_ANIM_SPAN_US ||
                                (warm && c->revisits >= SCENE_WARM_REVISITS));
 }
 
+static void spot_reset(SceneTracker *t)
+{
+    t->spot_us = 0;
+    t->spot_cycles = 0;
+    t->quiet = 0;
+    for (int i = 0; i < SCENE_CELLS; i++)
+        t->spot[i] = 0;
+}
+
 void scene_reset(SceneTracker *t)
 {
+    spot_reset(t);
     t->ref.w = 0;
     t->stable = 0;
     t->masked_us = 0; /* not warm */
@@ -165,9 +189,8 @@ void scene_reset(SceneTracker *t)
     }
 }
 
-/* Do the cells with keep[i] set fit in SCENE_ICON x SCENE_ICON cells?
- * A row of text does not. */
-static int icon_sized(const uint8_t *keep, uint32_t cols)
+/* Do the cells with keep[i] set fit in size x size cells? */
+static int fits(const uint8_t *keep, uint32_t cols, uint32_t size)
 {
     uint32_t c0 = cols, c1 = 0, r0 = SCENE_CELLS, r1 = 0, c = 0, r = 0;
     int n = 0;
@@ -184,7 +207,43 @@ static int icon_sized(const uint8_t *keep, uint32_t cols)
             r++;
         }
     }
-    return n && c1 - c0 < SCENE_ICON && r1 - r0 < SCENE_ICON;
+    return n && c1 - c0 < size && r1 - r0 < size;
+}
+
+/* Do they fit in SCENE_ICON x SCENE_ICON cells? A row of text does not. */
+static int icon_sized(const uint8_t *keep, uint32_t cols)
+{
+    return fits(keep, cols, SCENE_ICON);
+}
+
+/* Grows the spot by the cells that changed now (not masked), or starts a
+ * new one when they don't fit in it. Returns 1 when the screen becomes
+ * quiet: the spot has lasted SCENE_QUIET_US and cycled. */
+static int track_spot(SceneTracker *t, int64_t now, uint32_t cols)
+{
+    uint8_t moved[SCENE_CELLS], grown[SCENE_CELLS];
+    int any = 0;
+    for (int i = 0; i < SCENE_CELLS; i++) {
+        moved[i] = t->cell[i].moved_us == now && !t->cell[i].masked;
+        grown[i] = t->spot[i] | moved[i];
+        any |= moved[i];
+    }
+    if (any) {
+        int grow = t->spot_us && fits(grown, cols, SCENE_SPOT);
+        if (!grow) {
+            spot_reset(t);
+            if (fits(moved, cols, SCENE_SPOT))
+                t->spot_us = now;
+        }
+        for (int i = 0; i < SCENE_CELLS && t->spot_us; i++) {
+            t->spot[i] = grow ? grown[i] : moved[i];
+            t->spot_cycles |= moved[i] && !t->cell[i].fresh;
+        }
+    }
+    if (t->quiet || t->stable || !t->spot_cycles || now - t->spot_us < SCENE_QUIET_US)
+        return 0;
+    t->quiet = 1;
+    return 1;
 }
 
 /* Is a cell next to the cell at row r, column c (8 neighbours) an icon in
@@ -203,7 +262,7 @@ static int next_to_icon(const uint8_t *mask, uint32_t r, uint32_t c, uint32_t ro
  * next to an animated one that went back to a recent state is its edge
  * (reached by the icon's largest frames only, too rarely to count as
  * cycling; an icon cell paused on a recent state): masked while the icon
- * is, until it shows something new. At most SCENE_ANIM_MAX edges, besides.
+ * is, whatever it shows. At most SCENE_ANIM_MAX edges, besides.
  * Returns 1 when a mask ended: the cell stopped or showed something new,
  * and whatever it hid is a change. */
 static int mask_animated(SceneTracker *t, int64_t now, uint32_t cols)
@@ -221,9 +280,10 @@ static int mask_animated(SceneTracker *t, int64_t now, uint32_t cols)
         n = 0;
     for (int i = 0; i < SCENE_CELLS && n && r < rows; i++) {
         const SceneCell *cell = &t->cell[i];
-        /* revisits > 0: the last change was a recent state, not the player's */
-        if (!mask[i] && cell->revisits > 0 && (cell->masked || cell->moved_us == now) &&
-            next_to_icon(mask, r, c, rows, cols)) {
+        /* starts on a change back to a recent state (not the player's) */
+        int edge = cell->masked == SCENE_MASK_EDGE ||
+                   (cell->revisits > 0 && !cell->fresh && (cell->masked || cell->moved_us == now));
+        if (!mask[i] && edge && next_to_icon(mask, r, c, rows, cols)) {
             mask[i] = SCENE_MASK_EDGE;
             edges++;
         }
@@ -281,15 +341,22 @@ static int unmask_on_edge(SceneTracker *t, int64_t now, int64_t edge_us)
     return ended;
 }
 
-int scene_update(SceneTracker *t, const SceneSig *sig, int64_t now, int64_t input_us, int64_t edge_us)
+SceneEvent scene_update(SceneTracker *t, const SceneSig *sig, int64_t now, int64_t input_us, int64_t edge_us)
 {
     int changed = !same_grid(&t->ref, sig), by_input = now - input_us <= SCENE_INPUT_US;
+    SceneEvent quiet;
     if (changed)
         scene_reset(t);
+    if (edge_us != t->edge_us)
+        spot_reset(t); /* the player's doing */
     for (int i = 0; i < SCENE_CELLS; i++)
         track(&t->cell[i], sig->hash[i], now, by_input);
     changed |= unmask_on_edge(t, now, edge_us);
-    changed |= mask_animated(t, now, sig->cols);
+    if (mask_animated(t, now, sig->cols)) {
+        changed = 1;
+        spot_reset(t); /* what the mask hid is not the spot's */
+    }
+    quiet = track_spot(t, now, sig->cols) ? SCENE_QUIET : SCENE_NONE;
     for (int i = 0; i < SCENE_CELLS && !changed; i++)
         changed = sig->hash[i] != t->ref.hash[i] && !t->cell[i].masked;
     if (changed) {
@@ -304,24 +371,34 @@ int scene_update(SceneTracker *t, const SceneSig *sig, int64_t now, int64_t inpu
             t->id = 1;
         t->stable = 0;
         t->changed_us = now;
-        return 0;
+        return quiet;
     }
     if (t->stable || now - t->changed_us < SCENE_STABLE_US)
-        return 0;
+        return quiet;
     if (waiting_for_animation(t, now))
-        return 0;
+        return quiet;
     t->stable = 1;
-    return 1;
+    return SCENE_SETTLED;
 }
 
-uint32_t scene_match(const SceneTracker *t, const SceneSig *sig)
+static uint32_t match(const SceneTracker *t, const SceneSig *sig, int spot)
 {
     if (!same_grid(&t->ref, sig))
         return 0;
     for (int i = 0; i < SCENE_CELLS; i++)
-        if (sig->hash[i] != t->ref.hash[i] && !t->cell[i].masked)
+        if (sig->hash[i] != t->ref.hash[i] && !t->cell[i].masked && !(spot && t->spot[i]))
             return 0;
     return t->id;
+}
+
+uint32_t scene_match(const SceneTracker *t, const SceneSig *sig)
+{
+    return match(t, sig, 0);
+}
+
+uint32_t scene_match_since(const SceneTracker *t, const SceneSig *sig, int64_t sig_us)
+{
+    return match(t, sig, t->quiet && t->spot_us && sig_us >= t->spot_us);
 }
 
 int64_t scene_unsettled_us(const SceneTracker *t, int64_t now)

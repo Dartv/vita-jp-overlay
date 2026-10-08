@@ -723,12 +723,37 @@ static void test_http(void)
     TEST_CHECK(strstr(m.out, "POST /x HTTP/1.1\r\nHost: example.com\r\n") == m.out);
     TEST_CHECK(strstr(m.out, "Content-Length: 5\r\n") != NULL);
     TEST_CHECK(strstr(m.out, "A: b\r\n\r\nhello") != NULL);
+    TEST_CHECK(strstr(m.out, "Connection: close\r\n") != NULL);
+    /* a kept-alive request */
+    m.out_len = 0;
+    req.keep_alive = 1;
+    TEST_CHECK(vjo_http_send(&c, &req) == 0);
+    m.out[m.out_len] = 0;
+    TEST_CHECK(strstr(m.out, "Connection:") == NULL && strstr(m.out, "A: b\r\n\r\nhello") != NULL);
 
     m.in = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n";
     m.len = strlen(m.in);
     m.step = 3;
     TEST_CHECK(vjo_http_recv(&A, &c, 100, &resp) == 0);
-    TEST_CHECK(resp.status == 200 && !strcmp(resp.body, "Wikipedia"));
+    TEST_CHECK(resp.status == 200 && !strcmp(resp.body, "Wikipedia") && resp.keep_alive);
+    /* trailers are read up to the end of the reply */
+    m.in = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nX-T: 1\r\n\r\n";
+    m.len = strlen(m.in);
+    m.pos = 0;
+    TEST_CHECK(vjo_http_recv(&A, &c, 100, &resp) == 0 && !strcmp(resp.body, "ok") && resp.keep_alive);
+    TEST_CHECK(m.pos == m.len);
+    /* the server closes after this reply */
+    m.in = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok";
+    m.len = strlen(m.in);
+    m.pos = 0;
+    TEST_CHECK(vjo_http_recv(&A, &c, 100, &resp) == 0 && !strcmp(resp.body, "ok") && !resp.keep_alive);
+    /* more than the reply arrived: the connection is out of step */
+    m.in = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nokHTTP";
+    m.len = strlen(m.in);
+    m.pos = 0;
+    m.step = 0;
+    TEST_CHECK(vjo_http_recv(&A, &c, 100, &resp) == 0 && !strcmp(resp.body, "ok") && !resp.keep_alive);
+    m.step = 3;
 
     m.in = "HTTP/1.1 403 Forbidden\r\ncontent-length: 2\r\nContent-Encoding: gzip\r\n\r\nno";
     m.len = strlen(m.in);
@@ -742,7 +767,7 @@ static void test_http(void)
     m.in = "HTTP/1.0 200 OK\r\n\r\nuntil close";
     m.len = strlen(m.in);
     m.pos = 0;
-    TEST_CHECK(vjo_http_recv(&A, &c, 100, &resp) == 0 && !strcmp(resp.body, "until close"));
+    TEST_CHECK(vjo_http_recv(&A, &c, 100, &resp) == 0 && !strcmp(resp.body, "until close") && !resp.keep_alive);
     /* closed without close_notify: a read-until-close body may be cut */
     m.pos = 0;
     m.end_rc = VJO_E_HTTP;
@@ -772,11 +797,184 @@ static void test_http(void)
     m.in = "HTTP/1.1 2x0 OK\r\nContent-Length: 0\r\n\r\n";
     m.len = strlen(m.in);
     m.pos = 0;
-    TEST_CHECK(vjo_http_recv(&A, &c, 100, &resp) == VJO_E_HTTP);
+    TEST_CHECK(vjo_http_recv(&A, &c, 100, &resp) == VJO_E_HTTP && resp.status == 0);
     m.in = "HTTP/1.1 -20 OK\r\nContent-Length: 0\r\n\r\n";
     m.len = strlen(m.in);
     m.pos = 0;
     TEST_CHECK(vjo_http_recv(&A, &c, 100, &resp) == VJO_E_HTTP);
+    /* no body, whatever the headers say */
+    m.in = "HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n";
+    m.len = strlen(m.in);
+    m.pos = 0;
+    TEST_CHECK(vjo_http_recv(&A, &c, 100, &resp) == 0 && resp.body_len == 0 && resp.keep_alive);
+    /* no reply at all (a kept connection the server dropped) */
+    m.in = "";
+    m.len = 0;
+    m.pos = 0;
+    TEST_CHECK(vjo_http_recv(&A, &c, 100, &resp) == VJO_E_HTTP && resp.status == 0);
+}
+
+/* ---------- kept connections (VjoNetPool) over a fake network ---------- */
+
+/* Connection k serves responses[k] (several replies in turn when kept;
+ * NULL = refused) one byte per read, so the reader never reads ahead. */
+typedef struct {
+    const char *responses[4];
+    VjoMemConn conns[4];
+    char hosts[4][32];
+    int n_connects, n_disconnects;
+    int acquire_rc; /* what acquire() reports */
+    uint64_t now;
+} PoolNet;
+
+static int pool_connect(void *ud, const char *host, int port, int timeout_us, int io_timeout_us, VjoConn *out)
+{
+    PoolNet *f = (PoolNet *)ud;
+    int k = f->n_connects;
+    (void)port;
+    (void)timeout_us;
+    (void)io_timeout_us;
+    if (k >= 4 || !f->responses[k])
+        return VJO_E_NET;
+    f->n_connects++;
+    snprintf(f->hosts[k], sizeof(f->hosts[k]), "%s", host);
+    memset(&f->conns[k], 0, sizeof(f->conns[k]));
+    f->conns[k].in = f->responses[k];
+    f->conns[k].len = strlen(f->responses[k]);
+    f->conns[k].step = 1;
+    vjo_memconn_init(&f->conns[k], out);
+    return VJO_OK;
+}
+
+static void pool_disconnect(void *ud, VjoConn *c)
+{
+    (void)c;
+    ((PoolNet *)ud)->n_disconnects++;
+}
+
+static int pool_acquire(void *ud, VjoConn *c)
+{
+    (void)c;
+    return ((PoolNet *)ud)->acquire_rc;
+}
+
+static uint64_t pool_now(void *ud)
+{
+    return ((PoolNet *)ud)->now;
+}
+
+static void pool_net(PoolNet *f, VjoPlatform *p, VjoNetPool *pool, int slots)
+{
+    static uint8_t mem[4][32 * 1024];
+    TEST_ASSERT(vjo_net_pool_size(slots) <= sizeof(mem));
+    memset(f, 0, sizeof(*f));
+    f->now = 1000000;
+    memset(p, 0, sizeof(*p));
+    p->ud = f;
+    p->connect = pool_connect;
+    p->disconnect = pool_disconnect;
+    p->acquire = pool_acquire;
+    p->now_us = pool_now;
+    p->plain_http = 1;
+    vjo_net_pool_init(pool, mem, vjo_net_pool_size(slots), 10000000);
+    p->pool = pool;
+}
+
+#define REPLY1(c) "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n" c
+
+static int pool_get(const VjoPlatform *p, const char *host, const char *expect)
+{
+    VjoHttpRequest req;
+    VjoHttpResponse resp;
+    VjoErr err;
+    int rc;
+    memset(&req, 0, sizeof(req));
+    memset(&err, 0, sizeof(err));
+    req.method = "GET";
+    req.host = host;
+    req.path = "/";
+    rc = vjo_http_request(&A, p, 443, 1, &req, 100, &resp, &err);
+    if (rc == VJO_OK && expect && strcmp(resp.body, expect))
+        return -1;
+    return rc;
+}
+
+static void test_net_pool(void)
+{
+    PoolNet f;
+    VjoPlatform p;
+    VjoNetPool pool;
+    setup();
+
+    /* two requests on one connection */
+    pool_net(&f, &p, &pool, 2);
+    f.responses[0] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nab" "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\ncd";
+    TEST_CHECK(pool_get(&p, "a.example", "ab") == VJO_OK && pool_get(&p, "a.example", "cd") == VJO_OK);
+    TEST_CHECK(f.n_connects == 1 && f.n_disconnects == 0);
+    vjo_net_pool_close(&p);
+    TEST_CHECK(f.n_disconnects == 1);
+
+    /* no reply on the kept connection (the server dropped it): once more
+     * on a new one */
+    pool_net(&f, &p, &pool, 2);
+    f.responses[0] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nab";
+    f.responses[1] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\ncd";
+    TEST_CHECK(pool_get(&p, "a.example", "ab") == VJO_OK && pool_get(&p, "a.example", "cd") == VJO_OK);
+    TEST_CHECK(f.n_connects == 2 && f.n_disconnects == 1);
+
+    /* a reply cut short is an error, not retried */
+    pool_net(&f, &p, &pool, 2);
+    f.responses[0] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nab" "HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\ncd";
+    f.responses[1] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nef";
+    TEST_CHECK(pool_get(&p, "a.example", "ab") == VJO_OK && pool_get(&p, "a.example", NULL) != VJO_OK);
+    TEST_CHECK(f.n_connects == 1 && f.n_disconnects == 1);
+
+    /* the server closed it while idle (acquire says so): a new one */
+    pool_net(&f, &p, &pool, 2);
+    f.responses[0] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nab";
+    f.responses[1] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\ncd";
+    TEST_CHECK(pool_get(&p, "a.example", "ab") == VJO_OK);
+    f.acquire_rc = VJO_E_NET;
+    TEST_CHECK(pool_get(&p, "a.example", "cd") == VJO_OK && f.n_connects == 2 && f.n_disconnects == 1);
+
+    /* cancelled: no request, no new connection, the kept one stays */
+    pool_net(&f, &p, &pool, 2);
+    f.responses[0] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nab";
+    f.responses[1] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\ncd";
+    TEST_CHECK(pool_get(&p, "a.example", "ab") == VJO_OK);
+    f.acquire_rc = VJO_E_CANCELLED;
+    TEST_CHECK(pool_get(&p, "a.example", NULL) == VJO_E_CANCELLED && f.n_connects == 1 && f.n_disconnects == 0);
+
+    /* idle too long: closed, a new one */
+    pool_net(&f, &p, &pool, 2);
+    f.responses[0] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nab" "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nxx";
+    f.responses[1] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\ncd";
+    TEST_CHECK(pool_get(&p, "a.example", "ab") == VJO_OK);
+    f.now += 10000001;
+    TEST_CHECK(pool_get(&p, "a.example", "cd") == VJO_OK && f.n_connects == 2 && f.n_disconnects == 1);
+
+    /* "Connection: close": not kept */
+    pool_net(&f, &p, &pool, 2);
+    f.responses[0] = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nab";
+    f.responses[1] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\ncd";
+    TEST_CHECK(pool_get(&p, "a.example", "ab") == VJO_OK && f.n_disconnects == 1);
+    TEST_CHECK(pool_get(&p, "a.example", "cd") == VJO_OK && f.n_connects == 2);
+
+    /* a third host takes the least recently used slot */
+    pool_net(&f, &p, &pool, 2);
+    f.responses[0] = REPLY1("a") REPLY1("A");
+    f.responses[1] = REPLY1("b");
+    f.responses[2] = REPLY1("c");
+    TEST_CHECK(pool_get(&p, "a.example", "a") == VJO_OK);
+    f.now += 1000;
+    TEST_CHECK(pool_get(&p, "b.example", "b") == VJO_OK);
+    f.now += 1000;
+    TEST_CHECK(pool_get(&p, "a.example", "A") == VJO_OK); /* a is now the more recent */
+    f.now += 1000;
+    TEST_CHECK(pool_get(&p, "c.example", "c") == VJO_OK);
+    TEST_CHECK(f.n_connects == 3 && f.n_disconnects == 1);
+    vjo_net_pool_close(&p);
+    TEST_CHECK(f.n_disconnects == 3);
 }
 
 /* ---------- styled text (ui::Text) ---------- */
@@ -1096,7 +1294,7 @@ static SceneSig frame_sig(void)
 static int settle(SceneTracker *t, const SceneSig *sig, int64_t *now, int max)
 {
     for (int i = 1; i <= max; i++)
-        if (scene_update(t, sig, *now += TICK, NO_INPUT, NO_INPUT))
+        if (scene_update(t, sig, *now += TICK, NO_INPUT, NO_INPUT) == SCENE_SETTLED)
             return i;
     return 0;
 }
@@ -1188,7 +1386,7 @@ static int run_icon(SceneTracker *t, const SceneSig *states, int n, int every, i
 {
     int settled = 0;
     for (int i = 0; i < ticks; i++)
-        settled += scene_update(t, &states[i / every % n], *now += TICK, NO_INPUT, NO_INPUT);
+        settled += scene_update(t, &states[i / every % n], *now += TICK, NO_INPUT, NO_INPUT) == SCENE_SETTLED;
     return settled;
 }
 
@@ -1418,7 +1616,7 @@ static void test_scene_input_and_masks(void)
     edge = now + TICK / 2; /* pressed, then held for 5 s */
     for (int i = 0; i < 40; i++) {
         now += TICK;
-        settled += scene_update(&t, &st[i / 4 % 2], now, now - edge <= 1500000 ? now : edge + 1500000, edge);
+        settled += scene_update(&t, &st[i / 4 % 2], now, now - edge <= 1500000 ? now : edge + 1500000, edge) == SCENE_SETTLED;
         if (i == 0)
             TEST_CHECK(t.id == id + 1 && t.masked == 0); /* the press */
     }
@@ -1428,7 +1626,7 @@ static void test_scene_input_and_masks(void)
     TEST_CHECK(t.masked == 1 && t.stable && settled <= 5);
     settled = 0;
     for (int i = 0; i < 24; i++)
-        settled += scene_update(&t, &st[i / 4 % 2], now += TICK, edge + 1500000, edge);
+        settled += scene_update(&t, &st[i / 4 % 2], now += TICK, edge + 1500000, edge) == SCENE_SETTLED;
     TEST_CHECK(t.id == id && settled == 0);
 }
 
@@ -1488,11 +1686,11 @@ static void test_scene_two_icons(void)
         st[k] = frame_sig();
     }
     for (int i = 0; i < 40; i++) /* the arrow every 4 signatures, AUTO every 6 */
-        settled += scene_update(&t, &st[(i / 4 % 2) | (i / 6 % 2) << 1], now += TICK, NO_INPUT, NO_INPUT);
+        settled += scene_update(&t, &st[(i / 4 % 2) | (i / 6 % 2) << 1], now += TICK, NO_INPUT, NO_INPUT) == SCENE_SETTLED;
     TEST_CHECK(t.masked == 2 && t.stable && settled <= 3);
     settled = 0;
     for (int i = 40; i < 120; i++)
-        settled += scene_update(&t, &st[(i / 4 % 2) | (i / 6 % 2) << 1], now += TICK, NO_INPUT, NO_INPUT);
+        settled += scene_update(&t, &st[(i / 4 % 2) | (i / 6 % 2) << 1], now += TICK, NO_INPUT, NO_INPUT) == SCENE_SETTLED;
     TEST_CHECK(settled == 0 && t.masked == 2);
 }
 
@@ -1544,7 +1742,8 @@ static void test_scene_warm_mask(void)
 
 /* Short lines (two glyphs) faded in and out over 4 signatures each, shown
  * 0.8 s: every line is a new screen that settles, and a capture of one
- * never matches another. */
+ * never matches another. (Once their cells are masked as cycling, a line
+ * is seen when it has held SCENE_STABLE_US.) */
 static void test_scene_fades(void)
 {
     static const uint32_t levels[4] = {0xFF404040u, 0xFF808080u, 0xFFC0C0C0u, WHITE};
@@ -1566,7 +1765,8 @@ static void test_scene_fades(void)
             sig = frame_sig();
             scene_update(&t, &sig, now += TICK, NO_INPUT, NO_INPUT);
         }
-        TEST_CHECK(settle(&t, &sig, &now, 6) == 3);
+        /* masked as cycling from the third line: held SCENE_STABLE_US, then settled */
+        TEST_CHECK(settle(&t, &sig, &now, 8) == (line < 2 ? 3 : 6));
         TEST_CHECK(scene_match(&t, &sig) == t.id && scene_match(&t, &prev) == 0);
         prev = sig;
         for (int step = 3; step >= 0; step--) { /* fade out */
@@ -1624,6 +1824,22 @@ static void spinning_mark(uint32_t x, uint32_t y, uint32_t f)
         frame_rect(x + 7, y + 3, w / 2, 4, 0xFFE0A0FFu);
 }
 
+/* The mark read while the game draws the next frame: its rows from `split`
+ * down are still the previous frame's. */
+static void torn_mark(uint32_t x, uint32_t y, uint32_t f, uint32_t split)
+{
+    static uint32_t top[15][16];
+    spinning_mark(x, y, f);
+    for (uint32_t r = 0; r < split; r++)
+        for (uint32_t c = 0; c < 16; c++)
+            top[r][c] = frame[(y + r) * frame_w + x + c];
+    frame_rect(x, y, 16, 15, DARK);
+    spinning_mark(x, y, f - 4);
+    for (uint32_t r = 0; r < split; r++)
+        for (uint32_t c = 0; c < 16; c++)
+            frame[(y + r) * frame_w + x + c] = top[r][c];
+}
+
 static void test_scene_spinning_mark(void)
 {
     SceneTracker t;
@@ -1646,7 +1862,7 @@ static void test_scene_spinning_mark(void)
             frame_text(4, 4 + line % 2 * 30, 100 * line, (int)n);
             spinning_mark(6 + n * GLYPH, 8 + line % 2 * 30, f);
             sig = frame_sig();
-            if (scene_update(&t, &sig, now, press, press)) {
+            if (scene_update(&t, &sig, now, press, press) == SCENE_SETTLED) {
                 TEST_CHECK(!settled);
                 settled = k;
                 id = t.id;
@@ -1657,6 +1873,117 @@ static void test_scene_spinning_mark(void)
         TEST_MSG("line %u settled after %u signatures", line, settled);
         TEST_CHECK(t.id == id && t.stable && t.masked >= 1);
     }
+}
+
+/* The spinning mark on a game whose frame is read while it draws (the PSP
+ * emulator): a third of the reads mix two frames, at any row, so the mark
+ * keeps showing states its cells have not seen. Once masked, it stays
+ * masked: the line settles once and keeps its scene. */
+static void test_scene_torn_mark(void)
+{
+    SceneTracker t;
+    SceneSig sig;
+    int64_t now = 100000000;
+    uint32_t f = 0, v = 1;
+    memset(&t, 0, sizeof(t));
+
+    for (uint32_t line = 0; line < 6; line++) {
+        int64_t press = now += TICK;
+        uint32_t n = 8 + line * 3, settles = 0, id = 0;
+        for (uint32_t k = 1; k <= 60; k++, now += TICK, f += 8) { /* 8 s */
+            frame_new(458, 64);
+            frame_text(4, 4, 100 * line, (int)n);
+            v = v * 1103515245u + 12345u;
+            if (v >> 16 & 1 && (v >> 17) % 3 == 0)
+                torn_mark(6 + n * GLYPH, 8, f, 1 + (v >> 20) % 14);
+            else
+                spinning_mark(6 + n * GLYPH, 8, f);
+            sig = frame_sig();
+            if (scene_update(&t, &sig, now, press, press) == SCENE_SETTLED) {
+                settles++;
+                id = t.id;
+            }
+        }
+        TEST_CHECK(settles == 1 && t.id == id && t.masked >= 1);
+        TEST_MSG("line %u: settled %u times, masked %d", line, settles, t.masked);
+    }
+}
+
+/* The spinning mark, read whole or torn: the screen is quiet (worth
+ * capturing) well before it settles, never while a line is typed. A
+ * capture taken once quiet shows the screen from then on, through the
+ * mask and the settle; one of the line still being typed never does. */
+static void test_scene_quiet_mark(void)
+{
+    SceneTracker t;
+    SceneSig sig, cap, part;
+    int64_t now = 100000000, cap_us = 0, part_us = 0;
+    uint32_t f = 0, v = 1;
+    memset(&t, 0, sizeof(t));
+
+    for (uint32_t line = 0; line < 8; line++) {
+        int64_t press = now += TICK;
+        uint32_t n = 6 + line * 5 % 12, quiet = 0, settled = 0, typing_quiet = 0, lost = 0;
+        int torn = line >= 4;
+        for (uint32_t i = 1; i <= n; i++, now += TICK) {
+            frame_new(458, 64);
+            frame_text(4, 4 + line % 2 * 30, 100 * line, (int)i);
+            sig = frame_sig();
+            typing_quiet += scene_update(&t, &sig, now, press, press) == SCENE_QUIET;
+            if (i == 1 && line) /* the last line's capture */
+                TEST_CHECK(scene_match_since(&t, &cap, cap_us) == 0);
+            if (i == n - 1) {
+                part = sig;
+                part_us = now;
+            }
+        }
+        for (uint32_t k = 1; k <= 45; k++, now += TICK, f += 9) {
+            int r;
+            frame_new(458, 64);
+            frame_text(4, 4 + line % 2 * 30, 100 * line, (int)n);
+            v = v * 1103515245u + 12345u;
+            if (torn && v >> 16 & 1 && (v >> 17) % 3 == 0)
+                torn_mark(6 + n * GLYPH, 8 + line % 2 * 30, f, 1 + (v >> 20) % 14);
+            else
+                spinning_mark(6 + n * GLYPH, 8 + line % 2 * 30, f);
+            sig = frame_sig();
+            r = scene_update(&t, &sig, now, press, press);
+            if (r == 2 && !quiet) {
+                quiet = k;
+                cap = sig;
+                cap_us = now;
+            }
+            if (r == 1 && !settled)
+                settled = k;
+            if (quiet && k > quiet)
+                lost += scene_match_since(&t, &cap, cap_us) != t.id;
+            TEST_CHECK(scene_match_since(&t, &part, part_us) == 0);
+        }
+        TEST_CHECK(!typing_quiet && quiet && settled && quiet < settled);
+        TEST_MSG("line %u: quiet after %u signatures, settled after %u, quiet while typed %u", line, quiet,
+                 settled, typing_quiet);
+        TEST_CHECK(quiet <= 8); /* a torn read can delay it */
+        TEST_CHECK(!lost);
+        TEST_MSG("line %u: the capture did not show the screen %u times", line, lost);
+    }
+}
+
+/* Typing never makes the screen quiet, however slow (a glyph every 3
+ * signatures: within one spot for 400 ms, but only ever new states). */
+static void test_scene_quiet_typing(void)
+{
+    SceneTracker t;
+    SceneSig sig;
+    int64_t now = 100000000;
+    int quiet = 0;
+    memset(&t, 0, sizeof(t));
+    for (int i = 1; i <= 16 * 3; i++) {
+        frame_new(458, 64);
+        frame_text(4, 4, 7, (i + 2) / 3);
+        sig = frame_sig();
+        quiet += scene_update(&t, &sig, now += TICK, NO_INPUT, NO_INPUT) == SCENE_QUIET;
+    }
+    TEST_CHECK(!quiet);
 }
 
 /* A "next" mark blinking at a fixed spot, the line typed up to it (not
@@ -1687,7 +2014,7 @@ static void test_scene_text_next_to_mark(void)
         if (i / 4 % 2)
             frame_rect(910, 490, 20, 20, WHITE);
         sig = frame_sig();
-        if (scene_update(&t, &sig, now, press, press)) {
+        if (scene_update(&t, &sig, now, press, press) == SCENE_SETTLED) {
             settled_glyphs = g;
             settled_sig = sig;
         }
@@ -1697,14 +2024,15 @@ static void test_scene_text_next_to_mark(void)
     TEST_CHECK(scene_match(&t, &settled_sig) == t.id);
 }
 
-/* An icon two cells wide, blinking; then a glyph over its left half while
- * the right half blinks on: new content, so a change. */
+/* An icon two cells wide, blinking, then replaced by a glyph (no input):
+ * the glyph is new content once it has held SCENE_STABLE_US. */
 static void test_scene_content_in_icon(void)
 {
     SceneTracker t;
     SceneSig sig;
     int64_t now = 100000000;
     uint32_t id;
+    int ticks = 0;
     memset(&t, 0, sizeof(t));
 
     for (int k = 0; k < 40; k++, now += TICK) {
@@ -1719,11 +2047,13 @@ static void test_scene_content_in_icon(void)
     id = t.id;
     frame_new(900, 120);
     frame_text(20, 10, 100, 20);
-    frame_rect(830, 92, 30, 20, WHITE);
-    frame_glyph(818, 92, 999);
+    frame_glyph(830, 92, 999);
     sig = frame_sig();
-    scene_update(&t, &sig, now, NO_INPUT, NO_INPUT);
-    TEST_CHECK(t.id != id && scene_match(&t, &sig) == t.id);
+    while (t.id == id && ticks++ < 20)
+        scene_update(&t, &sig, now += TICK, NO_INPUT, NO_INPUT);
+    TEST_CHECK(t.id != id && ticks * TICK <= SCENE_STABLE_US + 2 * TICK);
+    TEST_MSG("seen after %d signatures", ticks);
+    TEST_CHECK(settle(&t, &sig, &now, 10) && scene_match(&t, &sig) == t.id);
 }
 
 /* An icon of 12 frames in one cell, looping (a sparkle): masked once it
@@ -1742,7 +2072,7 @@ static void test_scene_many_frames(void)
         frame_text(40, 420, 100, 12);
         frame_glyph(900, 480, 500 + (uint32_t)(k % 12));
         sig = frame_sig();
-        if (scene_update(&t, &sig, now, NO_INPUT, NO_INPUT)) {
+        if (scene_update(&t, &sig, now, NO_INPUT, NO_INPUT) == SCENE_SETTLED) {
             settled++;
             id = t.id;
         }
@@ -1785,12 +2115,16 @@ TEST_LIST = {
     {"scene_fades", test_scene_fades},
     {"scene_typewriter", test_scene_typewriter},
     {"scene_spinning_mark", test_scene_spinning_mark},
+    {"scene_quiet_mark", test_scene_quiet_mark},
+    {"scene_quiet_typing", test_scene_quiet_typing},
+    {"scene_torn_mark", test_scene_torn_mark},
     {"scene_text_next_to_mark", test_scene_text_next_to_mark},
     {"scene_content_in_icon", test_scene_content_in_icon},
     {"scene_many_frames", test_scene_many_frames},
     {"config", test_config},
     {"regions", test_regions},
     {"http", test_http},
+    {"net_pool", test_net_pool},
     {"styled", test_styled},
     {"jpegsw", test_jpegsw},
     {"fixtures", test_fixtures},

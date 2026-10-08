@@ -72,13 +72,17 @@ static int connect_poll(int fd, const SceNetSockaddrIn *sin)
     return ret;
 }
 
-static int connect_timed(int fd, const SceNetSockaddrIn *sin, int timeout_us)
+static int connect_timed(int fd, const SceNetSockaddrIn *sin, int timeout_us, const VjoNetCancel *nc)
 {
     int off = 0, ret = connect_start(fd, sin);
     int64_t end = (int64_t)sceKernelGetProcessTimeWide() + timeout_us;
     while (ret == 0) {
         if ((int64_t)sceKernelGetProcessTimeWide() >= end) {
             ret = SCE_NET_ERROR_ETIMEDOUT;
+            break;
+        }
+        if (nc && nc->cancelled) {
+            ret = SCE_NET_ERROR_EINTR;
             break;
         }
         sceKernelDelayThread(CONNECT_POLL_US);
@@ -88,13 +92,69 @@ static int connect_timed(int fd, const SceNetSockaddrIn *sin, int timeout_us)
     return ret > 0 ? 0 : ret;
 }
 
+/* ---- cancelling (VjoNetCancel) ----
+ * The socket is closed under the lock, so an abort never reaches a socket
+ * number another thread got since. */
+
+int vjo_net_cancel_init(VjoNetCancel *c)
+{
+    c->fd = -1;
+    c->cancelled = 0;
+    c->lock = sceKernelCreateMutex("VjoNetCancel", 0, 0, NULL);
+    return c->lock < 0 ? -1 : 0;
+}
+
+void vjo_net_cancel(VjoNetCancel *c)
+{
+    sceKernelLockMutex(c->lock, 1, NULL);
+    c->cancelled = 1;
+    if (c->fd >= 0)
+        sceNetSocketAbort(c->fd, 0);
+    sceKernelUnlockMutex(c->lock, 1);
+}
+
+void vjo_net_cancel_clear(VjoNetCancel *c)
+{
+    sceKernelLockMutex(c->lock, 1, NULL);
+    c->cancelled = 0;
+    sceKernelUnlockMutex(c->lock, 1);
+}
+
+/* fd is the socket in use; -1 if cancelled meanwhile. */
+static int cancel_track(VjoNetCancel *c, int fd)
+{
+    int ret = 0;
+    if (!c)
+        return 0;
+    sceKernelLockMutex(c->lock, 1, NULL);
+    if (c->cancelled)
+        ret = -1;
+    else
+        c->fd = fd;
+    sceKernelUnlockMutex(c->lock, 1);
+    return ret;
+}
+
+static void close_tracked(VjoNetCancel *c, int fd)
+{
+    if (c)
+        sceKernelLockMutex(c->lock, 1, NULL);
+    if (c && c->fd == fd)
+        c->fd = -1;
+    sceNetSocketClose(fd);
+    if (c)
+        sceKernelUnlockMutex(c->lock, 1);
+}
+
 static int vita_connect(void *ud, const char *host, int port, int timeout_us, int io_timeout_us, VjoConn *out)
 {
     SceNetSockaddrIn sin;
     SceNetInAddr addr;
+    VjoNetCancel *nc = (VjoNetCancel *)ud;
     int state = 0, fd, ret, timeout = io_timeout_us > 0 ? io_timeout_us : NET_TIMEOUT_US;
-    (void)ud;
 
+    if (nc && nc->cancelled)
+        return VJO_E_CANCELLED;
     if (sceNetCtlInetGetState(&state) < 0 || state != SCE_NETCTL_STATE_CONNECTED) {
         vjo_log("net: not connected (state %d)", state);
         return VJO_E_NET;
@@ -110,16 +170,22 @@ static int vita_connect(void *ud, const char *host, int port, int timeout_us, in
         vjo_log("net: socket failed 0x%08X", fd);
         return VJO_E_NET;
     }
+    if (cancel_track(nc, fd) < 0) {
+        sceNetSocketClose(fd);
+        return VJO_E_CANCELLED;
+    }
     sceNetSetsockopt(fd, SCE_NET_SOL_SOCKET, SCE_NET_SO_RCVTIMEO, &timeout, sizeof(timeout));
     sceNetSetsockopt(fd, SCE_NET_SOL_SOCKET, SCE_NET_SO_SNDTIMEO, &timeout, sizeof(timeout));
     if (timeout_us > 0)
-        ret = connect_timed(fd, &sin, timeout_us);
+        ret = connect_timed(fd, &sin, timeout_us, nc);
     else
         ret = sceNetConnect(fd, (SceNetSockaddr *)&sin, sizeof(sin));
     if (ret < 0) {
-        vjo_log("net: connect %s failed 0x%08X", host, ret);
-        sceNetSocketClose(fd);
-        return VJO_E_NET;
+        int cancelled = nc && nc->cancelled;
+        if (!cancelled)
+            vjo_log("net: connect %s failed 0x%08X", host, ret);
+        close_tracked(nc, fd);
+        return cancelled ? VJO_E_CANCELLED : VJO_E_NET;
     }
     out->ctx = (void *)(intptr_t)fd;
     out->send = sock_send;
@@ -198,8 +264,31 @@ int vjo_net_local_ipv4(uint32_t *ip, uint32_t *mask)
 
 static void vita_disconnect(void *ud, VjoConn *c)
 {
-    (void)ud;
-    sceNetSocketClose((int)(intptr_t)c->ctx);
+    close_tracked((VjoNetCancel *)ud, (int)(intptr_t)c->ctx);
+}
+
+/* A kept connection is usable if the server has neither closed it nor sent
+ * anything (an alert before closing) since the last reply. It is then the
+ * socket a cancel aborts. */
+static int vita_acquire(void *ud, VjoConn *c)
+{
+    int fd = (int)(intptr_t)c->ctx;
+    uint8_t b;
+    if ((unsigned)sceNetRecv(fd, &b, 1, SCE_NET_MSG_PEEK | SCE_NET_MSG_DONTWAIT) != SCE_NET_ERROR_EWOULDBLOCK)
+        return VJO_E_NET;
+    return cancel_track((VjoNetCancel *)ud, fd) < 0 ? VJO_E_CANCELLED : VJO_OK;
+}
+
+/* An idle kept connection is not the socket in use. */
+static void vita_release(void *ud, VjoConn *c)
+{
+    VjoNetCancel *nc = (VjoNetCancel *)ud;
+    if (!nc)
+        return;
+    sceKernelLockMutex(nc->lock, 1, NULL);
+    if (nc->fd == (int)(intptr_t)c->ctx)
+        nc->fd = -1;
+    sceKernelUnlockMutex(nc->lock, 1);
 }
 
 static void vita_random(void *ud, void *buf, size_t n)
@@ -229,18 +318,28 @@ static uint64_t vita_time(void *ud)
     return t.tick / 1000000ull - 62135596800ull;
 }
 
+static uint64_t vita_now_us(void *ud)
+{
+    (void)ud;
+    return (uint64_t)sceKernelGetProcessTimeWide();
+}
+
 static void vita_log(void *ud, const char *msg)
 {
     (void)ud;
     vjo_log("%s", msg);
 }
 
-void vjo_platform_vita(VjoPlatform *p)
+void vjo_platform_vita(VjoPlatform *p, VjoNetCancel *cancel)
 {
     sceClibMemset(p, 0, sizeof(*p));
+    p->ud = cancel;
     p->connect = vita_connect;
     p->disconnect = vita_disconnect;
     p->random = vita_random;
     p->unix_time = vita_time;
     p->log = vita_log;
+    p->now_us = vita_now_us;
+    p->acquire = vita_acquire;
+    p->release = vita_release;
 }

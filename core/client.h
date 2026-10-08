@@ -75,6 +75,11 @@ int vjo_overlay_from_text(VjoArena *a, const VjoPlatform *p, const VjoConfig *cf
 int vjo_overlay_from_jpeg(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg,
                           const VjoJpegSource *src, VjoOverlayData *out);
 
+/* Opens the connections a recognition will use ahead of it, when p keeps
+ * connections (p->pool): Lens, and dictionary's (a VJO_DICT_*; < 0 none),
+ * each connect giving up after timeout_us. */
+void vjo_overlay_warm(const VjoPlatform *p, int dictionary, int timeout_us);
+
 /* Short user-facing description of an error. */
 const char *vjo_err_text(VjoArena *a, int stage, const VjoErr *err);
 

@@ -449,7 +449,7 @@ static int anki_main(SceSize args, void *argp)
 
 int vjo_anki_start(void)
 {
-    vjo_platform_vita(&plat);
+    vjo_platform_vita(&plat, NULL);
     vjo_arena_init(&arena, NULL, 0);
     box_lock = sceKernelCreateMutex("VjoAnkiBox", 0, 0, NULL);
     evf = sceKernelCreateEventFlag("VjoAnkiEv", 0, 0, NULL);

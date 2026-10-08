@@ -52,6 +52,9 @@ typedef struct {
     uint32_t raw_stride;       /* bytes per row in raw */
     SceneSig capture_sig;      /* of the captured region (not for capture_full) */
     uint32_t capture_scene;    /* scene of the captured pixels, 0 = unknown */
+    int64_t capture_copy_us;   /* when the copy started (display.c) */
+    uint32_t region_seq;       /* capture_sig is this capture's (0 = none) */
+    int64_t region_us;         /* its copy_us */
     int64_t capture_requested_us;
     volatile int raw_valid;
     uint32_t capture_seq;      /* bumped per request */
