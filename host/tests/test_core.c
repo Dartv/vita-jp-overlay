@@ -364,9 +364,13 @@ static void test_jiten_parse(void)
     TEST_CHECK(r.tokens[0].pos16 == 4 && r.tokens[0].len16 == 2);
 
     TEST_ASSERT(vjo_entries_build(&A, "𠮟る。お茶を飲み、茶を", &r, &l) == 0);
-    TEST_CHECK(l.n_entries == 3);
+    /* one entry per occurrence: を twice */
+    TEST_CHECK(l.n_entries == 4);
     TEST_CHECK(!strcmp(vjo_render_highlight(&A, &l, 0), "𠮟る。【お茶】を飲み、茶を"));
+    TEST_CHECK(!strcmp(vjo_render_highlight(&A, &l, 1), "𠮟る。お茶【を】飲み、茶を"));
     TEST_CHECK(!strcmp(l.entries[2].text, "飲む (のむ) 299\nto drink; to gulp"));
+    TEST_CHECK(!strcmp(vjo_render_highlight(&A, &l, 3), "𠮟る。お茶を飲み、【茶】を"));
+    TEST_CHECK(l.entries[3].vocab == l.entries[1].vocab && l.entries[3].text == l.entries[1].text);
 
     TEST_CHECK(vjo_jiten_parse_response(&A, "{\"tokens\":[]}", 13, &r) == -1);
     TEST_CHECK(!strcmp(vjo_jiten_error_message(&A, "{\"title\":\"Unauthorized\",\"status\":401}", 37),
@@ -397,6 +401,21 @@ static void test_entries(void)
     TEST_CHECK(!strcmp(vjo_render_highlight(&A, &l, 2), "猫が\n【好き】"));
     TEST_CHECK(!strcmp(vjo_entries_body(&A, &l),
                        "猫 (ねこ) 1500\ncat\nfeline\n\nが 50\nindicates subject\n\n好き 99999\nliked"));
+
+    /* a word used twice: an entry for each, in text order; a word without
+     * a token comes last */
+    jp = "{\"tokens\":[[0,0,1,null],[1,1,1,null],[0,2,1,null]],\"vocabulary\":["
+         "[10,20,30,\"猫\",\"ねこ\",1500,[\"cat\"]],"
+         "[1,2,3,\"と\",\"と\",20,[\"and\"]],"
+         "[11,21,31,\"犬\",\"いぬ\",900,[\"dog\"]]]}";
+    TEST_ASSERT(vjo_jpdb_parse_response(&A, jp, strlen(jp), &r) == 0);
+    TEST_ASSERT(vjo_entries_build(&A, "猫と猫", &r, &l) == 0);
+    TEST_CHECK(l.n_entries == 4);
+    TEST_CHECK(!strcmp(vjo_render_highlight(&A, &l, 0), "【猫】と猫"));
+    TEST_CHECK(!strcmp(vjo_render_highlight(&A, &l, 1), "猫【と】猫"));
+    TEST_CHECK(!strcmp(vjo_render_highlight(&A, &l, 2), "猫と【猫】"));
+    TEST_CHECK(l.entries[2].vocab == l.entries[0].vocab);
+    TEST_CHECK(!strcmp(l.entries[3].text, "犬 (いぬ) 900\ndog") && l.entries[3].hl_start == -1);
 }
 
 static void test_entries_surrogates_and_trim(void)
