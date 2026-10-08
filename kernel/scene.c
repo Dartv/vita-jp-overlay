@@ -110,7 +110,6 @@ static void track(SceneCell *c, uint32_t hash, int64_t now, int by_input)
         c->next = 1 % SCENE_HISTORY;
         c->revisits = 0;
         c->run_start_us = c->moved_us = now - SCENE_ANIM_GAP_US - 1; /* no run */
-        c->unmasked_us = now - SCENE_ANIM_WARM_US - 1;
         return;
     }
     if (hash == c->last)
@@ -142,18 +141,24 @@ static int cycling(const SceneCell *c, int64_t now)
     return running(c, now) && c->revisits >= SCENE_ANIM_REVISITS;
 }
 
-/* Cycling for SCENE_ANIM_SPAN_US, or again soon after a mask ended (the
- * "next" icon of the next line, after the line was typed). */
-static int animated(const SceneCell *c, int64_t now)
+/* Cycling for SCENE_ANIM_SPAN_US, or for SCENE_WARM_REVISITS revisits in
+ * a row while warm: the "next" icon of the next line, wherever it ends.
+ * More revisits than SCENE_ANIM_REVISITS: a cell of text being typed can
+ * sample like its empty state twice in a row. A masked cell stays animated
+ * while it cycles; a state not among its last SCENE_HISTORY is new
+ * content, which ends the mask. */
+static int animated(const SceneTracker *t, const SceneCell *c, int64_t now)
 {
+    int warm = t->masked_us && now - t->masked_us <= SCENE_ANIM_WARM_US;
     return cycling(c, now) && (c->moved_us - c->run_start_us >= SCENE_ANIM_SPAN_US ||
-                               now - c->unmasked_us <= SCENE_ANIM_WARM_US);
+                               (warm && c->revisits >= SCENE_WARM_REVISITS));
 }
 
 void scene_reset(SceneTracker *t)
 {
     t->ref.w = 0;
     t->stable = 0;
+    t->masked_us = 0; /* not warm */
     for (int i = 0; i < SCENE_CELLS; i++) {
         t->cell[i].seen = 0;
         t->cell[i].masked = 0;
@@ -182,29 +187,60 @@ static int icon_sized(const uint8_t *keep, uint32_t cols)
     return n && c1 - c0 < SCENE_ICON && r1 - r0 < SCENE_ICON;
 }
 
-/* Masks the animated cells, unless there are more than SCENE_ANIM_MAX (an
- * animated background: masking it would hide the text over it). Returns 1
- * when a mask ended: the cell stopped, and whatever it hid is a change. */
-static int mask_animated(SceneTracker *t, int64_t now)
+/* Is a cell next to the cell at row r, column c (8 neighbours) an icon in
+ * mask? */
+static int next_to_icon(const uint8_t *mask, uint32_t r, uint32_t c, uint32_t rows, uint32_t cols)
 {
-    uint8_t anim[SCENE_CELLS];
-    int n = 0, ended = 0;
+    for (uint32_t y = r ? r - 1 : 0; y <= r + 1 && y < rows; y++)
+        for (uint32_t x = c ? c - 1 : 0; x <= c + 1 && x < cols; x++)
+            if (mask[y * cols + x] == SCENE_MASK_ICON)
+                return 1;
+    return 0;
+}
+
+/* Masks the animated cells, unless there are more than SCENE_ANIM_MAX (an
+ * animated background: masking it would hide the text over it). A cell
+ * next to an animated one that went back to a recent state is its edge
+ * (reached by the icon's largest frames only, too rarely to count as
+ * cycling; an icon cell paused on a recent state): masked while the icon
+ * is, until it shows something new. At most SCENE_ANIM_MAX edges, besides.
+ * Returns 1 when a mask ended: the cell stopped or showed something new,
+ * and whatever it hid is a change. */
+static int mask_animated(SceneTracker *t, int64_t now, uint32_t cols)
+{
+    uint8_t mask[SCENE_CELLS];
+    uint32_t rows = 0, r = 0, c = 0;
+    int n = 0, edges = 0, ended = 0;
+    for (uint32_t k = 0; k + cols <= SCENE_CELLS; k += cols) /* no division */
+        rows++;
     for (int i = 0; i < SCENE_CELLS; i++) {
-        anim[i] = (uint8_t)animated(&t->cell[i], now);
-        n += anim[i];
+        mask[i] = animated(t, &t->cell[i], now) ? SCENE_MASK_ICON : 0;
+        n += mask[i] != 0;
     }
     if (n > SCENE_ANIM_MAX)
         n = 0;
-    for (int i = 0; i < SCENE_CELLS; i++) {
-        SceneCell *c = &t->cell[i];
-        int m = n && anim[i];
-        if (c->masked && !m) {
-            c->unmasked_us = now;
-            ended = 1;
+    for (int i = 0; i < SCENE_CELLS && n && r < rows; i++) {
+        const SceneCell *cell = &t->cell[i];
+        /* revisits > 0: the last change was a recent state, not the player's */
+        if (!mask[i] && cell->revisits > 0 && (cell->masked || cell->moved_us == now) &&
+            next_to_icon(mask, r, c, rows, cols)) {
+            mask[i] = SCENE_MASK_EDGE;
+            edges++;
         }
-        c->masked = m;
+        if (++c == cols) {
+            c = 0;
+            r++;
+        }
+    }
+    for (int i = 0; i < SCENE_CELLS; i++) {
+        SceneCell *cell = &t->cell[i];
+        int m = !n || (mask[i] == SCENE_MASK_EDGE && edges > SCENE_ANIM_MAX) ? 0 : mask[i];
+        ended |= cell->masked && !m;
+        cell->masked = m;
     }
     t->masked = n;
+    if (n)
+        t->masked_us = now;
     return ended;
 }
 
@@ -226,17 +262,23 @@ static int waiting_for_animation(const SceneTracker *t, int64_t now)
 /* A new input edge (a press, a release, a touch) ends every mask: what
  * the player did may have changed what an icon-like cell shows (a short
  * menu scrolled by a held button, then tapped back). The icons are masked
- * again once they cycle (warm). */
-static void unmask_on_edge(SceneTracker *t, int64_t now, int64_t edge_us)
+ * again once they cycle (warm). Returns 1 when a mask ended. */
+static int unmask_on_edge(SceneTracker *t, int64_t now, int64_t edge_us)
 {
+    int ended = 0;
     if (edge_us == t->edge_us)
-        return;
+        return 0;
     t->edge_us = edge_us;
-    for (int i = 0; i < SCENE_CELLS; i++)
-        if (t->cell[i].masked) {
-            t->cell[i].revisits = 0;
-            t->cell[i].run_start_us = now;
+    for (int i = 0; i < SCENE_CELLS; i++) {
+        SceneCell *c = &t->cell[i];
+        if (c->masked) {
+            c->masked = 0;
+            c->revisits = 0;
+            c->run_start_us = now;
+            ended = 1;
         }
+    }
+    return ended;
 }
 
 int scene_update(SceneTracker *t, const SceneSig *sig, int64_t now, int64_t input_us, int64_t edge_us)
@@ -246,8 +288,8 @@ int scene_update(SceneTracker *t, const SceneSig *sig, int64_t now, int64_t inpu
         scene_reset(t);
     for (int i = 0; i < SCENE_CELLS; i++)
         track(&t->cell[i], sig->hash[i], now, by_input);
-    unmask_on_edge(t, now, edge_us);
-    changed |= mask_animated(t, now);
+    changed |= unmask_on_edge(t, now, edge_us);
+    changed |= mask_animated(t, now, sig->cols);
     for (int i = 0; i < SCENE_CELLS && !changed; i++)
         changed = sig->hash[i] != t->ref.hash[i] && !t->cell[i].masked;
     if (changed) {

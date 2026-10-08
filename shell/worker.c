@@ -43,6 +43,7 @@ static uint8_t scratch_mem[SCRATCH_SIZE];
 static int active = -1;               /* results[] index shown/cached */
 static uint32_t cache_scene; /* VjoState.scene of the cached result, 0 = unknown */
 static int cache_ok;
+static int cache_dictionary; /* the cached lookup's VJO_DICT_* */
 static VjoOverlayData cache_data[2];
 
 static VjoConfig cfg;      /* control thread */
@@ -83,6 +84,12 @@ static volatile int job_idx;
 static volatile int job_rc;
 static volatile uint32_t job_scene;
 static volatile int job_lookup;     /* the job looks the words up (else OCR only) */
+/* The cached result's text when the job started (NULL: no usable lookup).
+ * Its arena is not touched while the job runs (the job fills the other). */
+static const char *job_cached_text;
+/* The job's text is job_cached_text: no lookup, the cached result stays
+ * (and is now for the job's screen). */
+static volatile int job_same_text;
 /* cache_data[job_idx].sentence is ready (the lookup may still run): the
  * net thread only appends to the arena, so the control thread may read it */
 static volatile int job_text_ready;
@@ -310,9 +317,12 @@ static int run_job(VjoArena *a, VjoOverlayData *out, uint32_t *scene)
     src.size = (uint32_t)jb.len;
     if (vjo_overlay_ocr(a, &plat, &job_cfg, &src, out))
         return out->err.rc;
+    /* The screen changed only in pixels (a mark, a cursor, an effect):
+     * the cached lookup is this text's. */
+    job_same_text = job_cached_text && out->filtered && !sceClibStrcmp(out->filtered, job_cached_text);
     __sync_synchronize(); /* the sentence is visible before job_text_ready */
     job_text_ready = 1;
-    return job_lookup ? vjo_overlay_lookup(a, &plat, &job_cfg, out) : VJO_OK;
+    return job_lookup && !job_same_text ? vjo_overlay_lookup(a, &plat, &job_cfg, out) : VJO_OK;
 }
 
 static int net_main(SceSize args, void *argp)
@@ -350,6 +360,8 @@ static void start_job(const char *why, int lookup)
     job_lookup = lookup;
     job_idx = active == 0 ? 1 : 0;
     job_cfg = cfg; /* the control thread may reload cfg while the job runs */
+    job_cached_text = cache_ok && cache_dictionary == cfg.dictionary ? cache_data[active].filtered : NULL;
+    job_same_text = 0;
     job_done = 0;
     job_text_ready = 0;
     job_running = 1;
@@ -467,6 +479,22 @@ static void strip_show_result(const VjoOverlayData *d)
     vjo_arena_release(&scratch, mark);
 }
 
+/* The overlay was opened while the job ran: is the result for the screen
+ * shown now, with its lookup? Else a new job. Returns 1 if one started. */
+static int restart_old_job(int has_lookup)
+{
+    VjoState st;
+    if (ov != OV_OPEN_OLD_JOB)
+        return 0;
+    ov = OV_OPEN;
+    st.size = sizeof(st);
+    vjoGetState(&st);
+    if (same_scene(job_scene, st.scene) && has_lookup)
+        return 0;
+    start_job(has_lookup ? "result was for an earlier screen" : "the running job was OCR only", 1);
+    return 1;
+}
+
 /* The network thread finished the job. */
 static void on_job_done(void)
 {
@@ -478,34 +506,38 @@ static void on_job_done(void)
     job_text_ready = 0;
     ocr_failed = d->failed_stage == VJO_STAGE_OCR;
     backoff_note(&ocr_backoff, ocr_failed);
+    if (subtitles)
+        strip_show_result(d);
+    if (job_same_text) {
+        /* The cached result's text: that result (its arena stays active)
+         * is this screen's. A region change meanwhile cleared cache_ok, but
+         * the lookup depends on the text only. */
+        vjo_log("same text as the cached result: kept for this screen");
+        vjo_view_lock();
+        cache_ok = 1;
+        cache_scene = job_scene;
+        vjo_view_unlock();
+        if (ov == OV_OPEN && !job_lookup)
+            return; /* OCR only: the overlay already shows a result */
+        if (!restart_old_job(1) && ov != OV_CLOSED)
+            view_show_cache();
+        return;
+    }
     if (!ocr_failed && job_lookup)
         backoff_note(&dict_backoff, d->err.rc != VJO_OK);
     if (!job_lookup && ov == OV_OPEN) {
         /* OCR only, while the overlay shows a result or an error: that stays
-         * (and its arena stays active); the strip takes the sentence */
-        if (subtitles)
-            strip_show_result(d);
+         * (and its arena stays active); the strip took the sentence */
         return;
     }
     /* Publish the new arena; the old one becomes the next job's target. */
     vjo_view_lock();
     active = idx;
     cache_ok = d->err.rc == VJO_OK && job_lookup; /* the overlay needs the lookup */
+    cache_dictionary = job_cfg.dictionary;
     cache_scene = job_scene;
     vjo_view_unlock();
-    if (subtitles)
-        strip_show_result(d);
-    if (ov == OV_OPEN_OLD_JOB) {
-        VjoState st;
-        ov = OV_OPEN;
-        st.size = sizeof(st);
-        vjoGetState(&st);
-        if (!same_scene(job_scene, st.scene) || !job_lookup) {
-            start_job(job_lookup ? "result was for an earlier screen" : "the running job was OCR only", 1);
-            return;
-        }
-    }
-    if (ov != OV_CLOSED)
+    if (!restart_old_job(job_lookup) && ov != OV_CLOSED)
         view_show_cache();
 }
 

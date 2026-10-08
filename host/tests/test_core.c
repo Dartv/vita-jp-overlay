@@ -1607,6 +1607,150 @@ static void test_scene_typewriter(void)
     TEST_CHECK(settle(&t, &sig, &now, 10) == 3);
 }
 
+/* A VN text box (a PSP game's, 458x64) whose "next" mark spins after the
+ * last glyph: 8 frames (widths of a turn, the back shaded), 4 game frames
+ * each, sampled every 9, in other cells on every line. The first line
+ * settles once the mark is masked (SCENE_ANIM_SPAN_US); later lines
+ * sooner, a mask being recent; none changes again until the next press,
+ * so a result taken when it settles stays current. */
+static void spinning_mark(uint32_t x, uint32_t y, uint32_t f)
+{
+    static const uint32_t width[8] = {14, 12, 8, 5, 2, 5, 8, 12};
+    uint32_t ph = f / 4 % 8, w = width[ph];
+    frame_rect(x + (15 - w) / 2, y, w, 15, 0xFFC060FFu);
+    if (ph > 4)
+        frame_rect(x + (15 - w) / 2, y + 3, w / 2, 4, 0xFF9040C0u);
+    else
+        frame_rect(x + 7, y + 3, w / 2, 4, 0xFFE0A0FFu);
+}
+
+static void test_scene_spinning_mark(void)
+{
+    SceneTracker t;
+    SceneSig sig;
+    int64_t now = 100000000; /* not warm at the start */
+    uint32_t f = 0;
+    memset(&t, 0, sizeof(t));
+
+    for (uint32_t line = 0; line < 8; line++) {
+        int64_t press = now += TICK;
+        uint32_t n = 6 + line * 5 % 12, settled = 0, id = 0;
+        for (uint32_t i = 1; i <= n; i++, now += TICK) { /* typed, a glyph per signature */
+            frame_new(458, 64);
+            frame_text(4, 4 + line % 2 * 30, 100 * line, (int)i);
+            sig = frame_sig();
+            scene_update(&t, &sig, now, press, press);
+        }
+        for (uint32_t k = 1; k <= 45; k++, now += TICK, f += 9) { /* read for 6 s */
+            frame_new(458, 64);
+            frame_text(4, 4 + line % 2 * 30, 100 * line, (int)n);
+            spinning_mark(6 + n * GLYPH, 8 + line % 2 * 30, f);
+            sig = frame_sig();
+            if (scene_update(&t, &sig, now, press, press)) {
+                TEST_CHECK(!settled);
+                settled = k;
+                id = t.id;
+            }
+        }
+        TEST_CHECK(settled && settled * TICK < (line ? SCENE_ANIM_SPAN_US : SCENE_ANIM_SPAN_US + 1000000));
+        TEST_CHECK(line || settled * TICK >= SCENE_ANIM_SPAN_US);
+        TEST_MSG("line %u settled after %u signatures", line, settled);
+        TEST_CHECK(t.id == id && t.stable && t.masked >= 1);
+    }
+}
+
+/* A "next" mark blinking at a fixed spot, the line typed up to it (not
+ * the player's doing after SCENE_INPUT_US): the glyphs next to the masked
+ * mark are changes, the screen settles with the whole line only. */
+static void test_scene_text_next_to_mark(void)
+{
+    SceneTracker t;
+    SceneSig sig, settled_sig;
+    int64_t now = 100000000, press;
+    int settled_glyphs = 0;
+    memset(&t, 0, sizeof(t));
+
+    for (int k = 0; k < 45; k++, now += TICK) {
+        frame_new(960, 544);
+        frame_text(40, 420, 100, 30);
+        if (k / 4 % 2)
+            frame_rect(910, 490, 20, 20, WHITE);
+        sig = frame_sig();
+        scene_update(&t, &sig, now, NO_INPUT, NO_INPUT);
+    }
+    TEST_CHECK(t.masked >= 1);
+    press = now;
+    for (int i = 2; i <= 2 * 36 + 20; i++, now += TICK) { /* 36 glyphs, 2 signatures each */
+        int g = i / 2 < 36 ? i / 2 : 36;
+        frame_new(960, 544);
+        frame_text(40, 470, 300, g);
+        if (i / 4 % 2)
+            frame_rect(910, 490, 20, 20, WHITE);
+        sig = frame_sig();
+        if (scene_update(&t, &sig, now, press, press)) {
+            settled_glyphs = g;
+            settled_sig = sig;
+        }
+    }
+    TEST_CHECK(settled_glyphs == 36);
+    TEST_MSG("settled with %d glyphs", settled_glyphs);
+    TEST_CHECK(scene_match(&t, &settled_sig) == t.id);
+}
+
+/* An icon two cells wide, blinking; then a glyph over its left half while
+ * the right half blinks on: new content, so a change. */
+static void test_scene_content_in_icon(void)
+{
+    SceneTracker t;
+    SceneSig sig;
+    int64_t now = 100000000;
+    uint32_t id;
+    memset(&t, 0, sizeof(t));
+
+    for (int k = 0; k < 40; k++, now += TICK) {
+        frame_new(900, 120);
+        frame_text(20, 10, 100, 20);
+        if (k / 4 % 2)
+            frame_rect(830, 92, 30, 20, WHITE);
+        sig = frame_sig();
+        scene_update(&t, &sig, now, NO_INPUT, NO_INPUT);
+    }
+    TEST_CHECK(t.masked >= 1 && t.stable);
+    id = t.id;
+    frame_new(900, 120);
+    frame_text(20, 10, 100, 20);
+    frame_rect(830, 92, 30, 20, WHITE);
+    frame_glyph(818, 92, 999);
+    sig = frame_sig();
+    scene_update(&t, &sig, now, NO_INPUT, NO_INPUT);
+    TEST_CHECK(t.id != id && scene_match(&t, &sig) == t.id);
+}
+
+/* An icon of 12 frames in one cell, looping (a sparkle): masked once it
+ * has looped, as an icon of a few frames; then the screen stays settled. */
+static void test_scene_many_frames(void)
+{
+    SceneTracker t;
+    SceneSig sig;
+    int64_t now = 100000000;
+    uint32_t id = 0;
+    int settled = 0;
+    memset(&t, 0, sizeof(t));
+
+    for (int k = 0; k < 60; k++, now += TICK) {
+        frame_new(960, 544);
+        frame_text(40, 420, 100, 12);
+        frame_glyph(900, 480, 500 + (uint32_t)(k % 12));
+        sig = frame_sig();
+        if (scene_update(&t, &sig, now, NO_INPUT, NO_INPUT)) {
+            settled++;
+            id = t.id;
+        }
+    }
+    TEST_CHECK(settled == 1 && t.id == id && t.stable && t.masked >= 1);
+    TEST_MSG("settled %d times", settled);
+}
+
 TEST_LIST = {
     {"pb_roundtrip", test_pb_roundtrip},
     {"buf_interleaved", test_buf_interleaved},
@@ -1640,6 +1784,10 @@ TEST_LIST = {
     {"scene_warm_mask", test_scene_warm_mask},
     {"scene_fades", test_scene_fades},
     {"scene_typewriter", test_scene_typewriter},
+    {"scene_spinning_mark", test_scene_spinning_mark},
+    {"scene_text_next_to_mark", test_scene_text_next_to_mark},
+    {"scene_content_in_icon", test_scene_content_in_icon},
+    {"scene_many_frames", test_scene_many_frames},
     {"config", test_config},
     {"regions", test_regions},
     {"http", test_http},

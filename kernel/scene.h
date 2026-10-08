@@ -26,11 +26,17 @@
  * through unhooked touch calls), a menu cycled for SCENE_ANIM_SPAN_US is
  * masked like an icon, until SCENE_ANIM_GAP_US after it stops.
  * At most SCENE_ANIM_MAX cells are masked: an animated background masks
- * none. A cell masked within SCENE_ANIM_WARM_US is masked again as soon as
- * it cycles (the icon of the next line).
+ * none. While any cell is masked and SCENE_ANIM_WARM_US after, any cell is
+ * masked once it has cycled SCENE_WARM_REVISITS times, without waiting for
+ * SCENE_ANIM_SPAN_US (the icon of the next line, wherever that line ends;
+ * a short line fading out to an empty box can be taken for one meanwhile).
+ * A cell next to an animated one that goes back to a recent state without
+ * input is masked with it, for as long as that one is: the edge of the
+ * icon, reached by its largest frames only (at most SCENE_ANIM_MAX more).
  *
- * A mask ends SCENE_ANIM_GAP_US after the cell stops, and that is a change:
- * whatever the mask hid is not taken as the screen after that.
+ * A mask ends SCENE_ANIM_GAP_US after the cell stops, or when it shows a
+ * state that is not among its last SCENE_HISTORY (new content), and that
+ * is a change: whatever the mask hid is not taken as the screen after that.
  *
  * Settling waits while an icon cycles before it is masked: a screen with a
  * blinking icon settles when the icon first appears (a new state) and
@@ -44,11 +50,12 @@
 #include <stdint.h>
 
 #define SCENE_CELLS         128
-#define SCENE_HISTORY       8       /* recent states per cell (an icon's frames) */
+#define SCENE_HISTORY       16      /* recent states per cell (an icon's frames) */
 #define SCENE_ANIM_REVISITS 2       /* changes back to a recent state, in a row */
 #define SCENE_ANIM_SPAN_US  2000000 /* cycling this long = animated */
 #define SCENE_ANIM_GAP_US   1500000 /* a longer pause ends the run (a slow blink fits) */
-#define SCENE_ANIM_WARM_US  5000000 /* masked this recently: masked again at once */
+#define SCENE_ANIM_WARM_US  5000000 /* a mask this recently: cycling cells masked sooner, */
+#define SCENE_WARM_REVISITS 4       /* after this many revisits in a row */
 #define SCENE_ANIM_MAX      8       /* animated cells masked at most */
 #define SCENE_INPUT_US      500000  /* changes this soon after input are the player's */
 #define SCENE_ICON          2       /* an icon-sized change fits in 2x2 cells */
@@ -82,6 +89,9 @@ static inline uint32_t scene_acc_next_row(const SceneAcc *a)
     return a->next_y; /* >= h: the signature is complete */
 }
 
+#define SCENE_MASK_ICON 1 /* animated */
+#define SCENE_MASK_EDGE 2 /* next to an animated cell */
+
 typedef struct {
     uint32_t last;                /* the state in the last signature */
     int seen;                     /* last is set */
@@ -90,8 +100,7 @@ typedef struct {
     int revisits;                 /* changes back to a recent state, in a row */
     int64_t run_start_us;         /* first change of the current run of changes */
     int64_t moved_us;             /* last change */
-    int64_t unmasked_us;          /* last mask ended */
-    int masked;                   /* animated: ignored (as of the last signature) */
+    int masked;                   /* SCENE_MASK_*: ignored (as of the last signature) */
 } SceneCell;
 
 /* Scene numbers start at 1 and are never reused (0 = unknown), so a number
@@ -106,6 +115,7 @@ typedef struct {
     int masked;            /* cells masked as animated (log) */
     int icon_change;       /* the last change was icon-sized */
     int64_t edge_us;       /* the last input edge seen */
+    int64_t masked_us;     /* a cell was masked (warm for SCENE_ANIM_WARM_US); 0 = never */
 } SceneTracker;
 
 /* Forget the screen (new game or region); keeps the numbering. */
