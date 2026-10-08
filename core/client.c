@@ -228,6 +228,12 @@ int vjo_overlay_from_jpeg(VjoArena *a, const VjoPlatform *p, const VjoConfig *cf
     return vjo_overlay_lookup(a, p, cfg, out);
 }
 
+void vjo_overlay_warm(const VjoPlatform *p, int dictionary, int timeout_us)
+{
+    if (vjo_net_warm(p, VJO_LENS_HOST, 443, timeout_us) == VJO_OK && dictionary >= 0)
+        vjo_net_warm(p, vjo_dict_backend(dictionary)->host, 443, timeout_us);
+}
+
 const char *vjo_err_text(VjoArena *a, int stage, const VjoErr *err)
 {
     const VjoDictInfo *di = vjo_dict_info(err->dict);

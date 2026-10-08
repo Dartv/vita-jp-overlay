@@ -47,7 +47,9 @@ int vjo_http_send(VjoConn *c, const VjoHttpRequest *req)
         head_add(head, sizeof(head), &n, "Content-Type: %s\r\n", req->content_type);
     if (req->body_len || req->write_body)
         head_add(head, sizeof(head), &n, "Content-Length: %lu\r\n", (unsigned long)req->body_len);
-    head_add(head, sizeof(head), &n, "Connection: close\r\n%s\r\n", req->extra_headers ? req->extra_headers : "");
+    if (!req->keep_alive)
+        head_add(head, sizeof(head), &n, "Connection: close\r\n");
+    head_add(head, sizeof(head), &n, "%s\r\n", req->extra_headers ? req->extra_headers : "");
     if (n >= sizeof(head))
         return VJO_E_HTTP;
     rc = vjo_conn_send_all(c, head, n);
@@ -55,6 +57,8 @@ int vjo_http_send(VjoConn *c, const VjoHttpRequest *req)
         return rc;
     return req->write_body ? req->write_body(req->ud, c) : VJO_OK;
 }
+
+#define MAX_TRAILERS 32 /* more: the connection is not kept */
 
 /* Buffered reader over a connection. */
 typedef struct {
@@ -151,7 +155,7 @@ int vjo_http_recv(VjoArena *a, VjoConn *c, size_t max_body, VjoHttpResponse *res
     Rd *r;
     char line[512];
     size_t content_length = 0;
-    int have_length = 0, chunked = 0, rc = VJO_OK;
+    int have_length = 0, chunked = 0, conn_close = 0, status = 0, rc = VJO_OK;
     VjoBuf body;
 
     memset(resp, 0, sizeof(*resp));
@@ -175,8 +179,10 @@ int vjo_http_recv(VjoArena *a, VjoConn *c, size_t max_body, VjoHttpResponse *res
     for (int k = 9; k < 12; k++) {
         if (line[k] < '0' || line[k] > '9')
             return VJO_E_HTTP;
-        resp->status = resp->status * 10 + (line[k] - '0');
+        status = status * 10 + (line[k] - '0');
     }
+    resp->status = status;
+    conn_close = line[7] != '1'; /* HTTP/1.0 */
 
     for (;;) {
         int n = rd_line(r, line, sizeof(line));
@@ -199,11 +205,20 @@ int vjo_http_recv(VjoArena *a, VjoConn *c, size_t max_body, VjoHttpResponse *res
         } else if (vjo_ieq_prefix(line, "content-encoding:")) {
             if (vjo_ieq_prefix(hval(line, 17), "gzip"))
                 resp->gzip = 1;
+        } else if (vjo_ieq_prefix(line, "connection:")) {
+            if (vjo_ieq_prefix(hval(line, 11), "close"))
+                conn_close = 1;
         }
     }
 
     vjo_buf_init(&body, a);
 
+    /* These never have a body (RFC 9112 6.3), whatever the headers say. */
+    if ((status >= 100 && status < 200) || status == 204 || status == 304) {
+        chunked = 0;
+        have_length = 1;
+        content_length = 0;
+    }
     if (chunked) {
         for (;;) {
             size_t sz = 0;
@@ -230,8 +245,14 @@ int vjo_http_recv(VjoArena *a, VjoConn *c, size_t max_body, VjoHttpResponse *res
             }
             if (rc)
                 break;
-            if (sz == 0)
-                break; /* trailers are ignored (Connection: close) */
+            if (sz == 0) {
+                /* Trailers (ignored) up to the empty line that ends them. */
+                int k = 1;
+                for (int n = 0; k > 0 && n < MAX_TRAILERS; n++)
+                    k = rd_line(r, line, sizeof(line));
+                conn_close |= k != 0;
+                break;
+            }
             rc = read_exact(r, &body, max_body, sz);
             if (rc)
                 break;
@@ -244,6 +265,7 @@ int vjo_http_recv(VjoArena *a, VjoConn *c, size_t max_body, VjoHttpResponse *res
             rc = read_exact(r, &body, max_body, content_length);
     } else {
         /* Read until close. */
+        conn_close = 1;
         for (;;) {
             if (r->pos >= r->len && !rd_fill(r))
                 break;
@@ -261,5 +283,6 @@ int vjo_http_recv(VjoArena *a, VjoConn *c, size_t max_body, VjoHttpResponse *res
     if (!resp->body)
         return VJO_E_OOM;
     resp->body_len = body.len;
+    resp->keep_alive = !conn_close && r->pos == r->len;
     return VJO_OK;
 }

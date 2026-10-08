@@ -1,5 +1,6 @@
-/* Overlay content model: header text + dictionary entries, with the header
- * byte range of each entry's first token. */
+/* Overlay content model: header text + dictionary entries, one per
+ * occurrence of a word (a word used twice is navigated to twice), with its
+ * byte range in the header. */
 #ifndef VJO_ENTRIES_H
 #define VJO_ENTRIES_H
 
@@ -8,9 +9,9 @@
 
 typedef struct {
     const VjoVocab *vocab;
-    int first_pos16;        /* first token position in the lookup text, -1 if none */
+    int pos16;              /* token position in the lookup text, -1 if none */
     int hl_start, hl_end;   /* byte range in VjoEntryList.header, -1 if none */
-    const char *text;       /* "spelling (reading) rank\nmeaning..." */
+    const char *text;       /* "spelling (reading) rank\nmeaning..." (shared by a word's entries) */
 } VjoEntry;
 
 typedef struct {
@@ -21,7 +22,8 @@ typedef struct {
 
 /* `filtered` is the non-Japanese-filtered OCR text (before newline removal);
  * token positions refer to vjo_strip_newlines(filtered). Entries are in
- * text order. */
+ * text order: one per token with a word, then words without a token (in
+ * the dictionary's order). */
 int vjo_entries_build(VjoArena *a, const char *filtered, const VjoDictResult *r, VjoEntryList *out);
 
 /* Entry format: spelling + " (reading)" if different + " rank",

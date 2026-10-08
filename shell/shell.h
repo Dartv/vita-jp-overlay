@@ -75,10 +75,20 @@ void vjo_post_command(int cmd, const VjoRect *rect);
 /* worker.c */
 int vjo_worker_start(void);
 void vjo_worker_stop(void);
+
+/* capture.c */
+int vjo_capture_init(void);
+void vjo_capture_fini(void);
 /* Captures the screen (flags: VJO_CAPTURE_*) and encodes it as a JPEG into
  * out; serialized with the OCR job's capture (one kernel buffer). Returns
  * VJO_OK or a VJO_E_* code. */
 int vjo_capture_jpeg(VjoArena *a, uint32_t flags, int quality, VjoBuf *out, VjoState *st);
+
+/* game.c */
+/* The process's title ID; 0, or < 0 when not readable (yet). */
+int vjo_title_id(SceUID pid, char *tid, int size);
+/* vjoSetGameActive's mode (enum VjoGameMode) for a title ID. */
+int vjo_title_game_mode(const char *tid);
 
 /* anki.c: AnkiConnect thread */
 int vjo_anki_start(void);
@@ -94,7 +104,19 @@ void vjo_anki_post_add(unsigned list_seq, int entry);
 void vjo_overlay_init(void *plugin);
 
 /* platform_vita.c */
-void vjo_platform_vita(VjoPlatform *p);
+/* Lets another thread abandon the requests of the thread using a platform
+ * set up with it: vjo_net_cancel aborts the socket in use, and every
+ * connect fails until vjo_net_cancel_clear. */
+typedef struct {
+    SceUID lock; /* the socket in use vs an abort */
+    int fd;      /* -1: none */
+    volatile int cancelled;
+} VjoNetCancel;
+int vjo_net_cancel_init(VjoNetCancel *c);
+void vjo_net_cancel(VjoNetCancel *c);
+void vjo_net_cancel_clear(VjoNetCancel *c);
+/* cancel: NULL, or the VjoNetCancel of the thread using p. */
+void vjo_platform_vita(VjoPlatform *p, VjoNetCancel *cancel);
 /* This console's IPv4 address and netmask (host byte order); -1 if none. */
 int vjo_net_local_ipv4(uint32_t *ip, uint32_t *mask);
 /* Connects to port of up to VJO_NET_PROBE_MAX hosts (host byte order) at

@@ -96,6 +96,13 @@ static void publish(unsigned seq, const char *msg, int kind, int mark_entry)
                 g_view.anki_marks_seq = seq;
             }
             g_view.anki_mark[mark_entry] = 1;
+            /* the word's other occurrences in the text too */
+            if (g_view.list && mark_entry < g_view.list->n_entries) {
+                const VjoVocab *v = g_view.list->entries[mark_entry].vocab;
+                for (int i = 0; i < g_view.list->n_entries && i < VJO_MAX_ENTRIES; i++)
+                    if (g_view.list->entries[i].vocab == v)
+                        g_view.anki_mark[i] = 1;
+            }
         }
         sceClibSnprintf(g_view.anki_status, sizeof(g_view.anki_status), "%s", msg);
         g_view.anki_status_kind = kind;
@@ -442,7 +449,7 @@ static int anki_main(SceSize args, void *argp)
 
 int vjo_anki_start(void)
 {
-    vjo_platform_vita(&plat);
+    vjo_platform_vita(&plat, NULL);
     vjo_arena_init(&arena, NULL, 0);
     box_lock = sceKernelCreateMutex("VjoAnkiBox", 0, 0, NULL);
     evf = sceKernelCreateEventFlag("VjoAnkiEv", 0, 0, NULL);

@@ -18,6 +18,7 @@
 #include "regions.h"
 #include "render.h"
 #include "replay.h"
+#include "scene.h"
 #include "textfilter.h"
 #include "triggers.h"
 #include "utf.h"
@@ -363,9 +364,13 @@ static void test_jiten_parse(void)
     TEST_CHECK(r.tokens[0].pos16 == 4 && r.tokens[0].len16 == 2);
 
     TEST_ASSERT(vjo_entries_build(&A, "𠮟る。お茶を飲み、茶を", &r, &l) == 0);
-    TEST_CHECK(l.n_entries == 3);
+    /* one entry per occurrence: を twice */
+    TEST_CHECK(l.n_entries == 4);
     TEST_CHECK(!strcmp(vjo_render_highlight(&A, &l, 0), "𠮟る。【お茶】を飲み、茶を"));
+    TEST_CHECK(!strcmp(vjo_render_highlight(&A, &l, 1), "𠮟る。お茶【を】飲み、茶を"));
     TEST_CHECK(!strcmp(l.entries[2].text, "飲む (のむ) 299\nto drink; to gulp"));
+    TEST_CHECK(!strcmp(vjo_render_highlight(&A, &l, 3), "𠮟る。お茶を飲み、【茶】を"));
+    TEST_CHECK(l.entries[3].vocab == l.entries[1].vocab && l.entries[3].text == l.entries[1].text);
 
     TEST_CHECK(vjo_jiten_parse_response(&A, "{\"tokens\":[]}", 13, &r) == -1);
     TEST_CHECK(!strcmp(vjo_jiten_error_message(&A, "{\"title\":\"Unauthorized\",\"status\":401}", 37),
@@ -396,6 +401,21 @@ static void test_entries(void)
     TEST_CHECK(!strcmp(vjo_render_highlight(&A, &l, 2), "猫が\n【好き】"));
     TEST_CHECK(!strcmp(vjo_entries_body(&A, &l),
                        "猫 (ねこ) 1500\ncat\nfeline\n\nが 50\nindicates subject\n\n好き 99999\nliked"));
+
+    /* a word used twice: an entry for each, in text order; a word without
+     * a token comes last */
+    jp = "{\"tokens\":[[0,0,1,null],[1,1,1,null],[0,2,1,null]],\"vocabulary\":["
+         "[10,20,30,\"猫\",\"ねこ\",1500,[\"cat\"]],"
+         "[1,2,3,\"と\",\"と\",20,[\"and\"]],"
+         "[11,21,31,\"犬\",\"いぬ\",900,[\"dog\"]]]}";
+    TEST_ASSERT(vjo_jpdb_parse_response(&A, jp, strlen(jp), &r) == 0);
+    TEST_ASSERT(vjo_entries_build(&A, "猫と猫", &r, &l) == 0);
+    TEST_CHECK(l.n_entries == 4);
+    TEST_CHECK(!strcmp(vjo_render_highlight(&A, &l, 0), "【猫】と猫"));
+    TEST_CHECK(!strcmp(vjo_render_highlight(&A, &l, 1), "猫【と】猫"));
+    TEST_CHECK(!strcmp(vjo_render_highlight(&A, &l, 2), "猫と【猫】"));
+    TEST_CHECK(l.entries[2].vocab == l.entries[0].vocab);
+    TEST_CHECK(!strcmp(l.entries[3].text, "犬 (いぬ) 900\ndog") && l.entries[3].hl_start == -1);
 }
 
 static void test_entries_surrogates_and_trim(void)
@@ -703,12 +723,37 @@ static void test_http(void)
     TEST_CHECK(strstr(m.out, "POST /x HTTP/1.1\r\nHost: example.com\r\n") == m.out);
     TEST_CHECK(strstr(m.out, "Content-Length: 5\r\n") != NULL);
     TEST_CHECK(strstr(m.out, "A: b\r\n\r\nhello") != NULL);
+    TEST_CHECK(strstr(m.out, "Connection: close\r\n") != NULL);
+    /* a kept-alive request */
+    m.out_len = 0;
+    req.keep_alive = 1;
+    TEST_CHECK(vjo_http_send(&c, &req) == 0);
+    m.out[m.out_len] = 0;
+    TEST_CHECK(strstr(m.out, "Connection:") == NULL && strstr(m.out, "A: b\r\n\r\nhello") != NULL);
 
     m.in = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n";
     m.len = strlen(m.in);
     m.step = 3;
     TEST_CHECK(vjo_http_recv(&A, &c, 100, &resp) == 0);
-    TEST_CHECK(resp.status == 200 && !strcmp(resp.body, "Wikipedia"));
+    TEST_CHECK(resp.status == 200 && !strcmp(resp.body, "Wikipedia") && resp.keep_alive);
+    /* trailers are read up to the end of the reply */
+    m.in = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nX-T: 1\r\n\r\n";
+    m.len = strlen(m.in);
+    m.pos = 0;
+    TEST_CHECK(vjo_http_recv(&A, &c, 100, &resp) == 0 && !strcmp(resp.body, "ok") && resp.keep_alive);
+    TEST_CHECK(m.pos == m.len);
+    /* the server closes after this reply */
+    m.in = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok";
+    m.len = strlen(m.in);
+    m.pos = 0;
+    TEST_CHECK(vjo_http_recv(&A, &c, 100, &resp) == 0 && !strcmp(resp.body, "ok") && !resp.keep_alive);
+    /* more than the reply arrived: the connection is out of step */
+    m.in = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nokHTTP";
+    m.len = strlen(m.in);
+    m.pos = 0;
+    m.step = 0;
+    TEST_CHECK(vjo_http_recv(&A, &c, 100, &resp) == 0 && !strcmp(resp.body, "ok") && !resp.keep_alive);
+    m.step = 3;
 
     m.in = "HTTP/1.1 403 Forbidden\r\ncontent-length: 2\r\nContent-Encoding: gzip\r\n\r\nno";
     m.len = strlen(m.in);
@@ -722,7 +767,7 @@ static void test_http(void)
     m.in = "HTTP/1.0 200 OK\r\n\r\nuntil close";
     m.len = strlen(m.in);
     m.pos = 0;
-    TEST_CHECK(vjo_http_recv(&A, &c, 100, &resp) == 0 && !strcmp(resp.body, "until close"));
+    TEST_CHECK(vjo_http_recv(&A, &c, 100, &resp) == 0 && !strcmp(resp.body, "until close") && !resp.keep_alive);
     /* closed without close_notify: a read-until-close body may be cut */
     m.pos = 0;
     m.end_rc = VJO_E_HTTP;
@@ -752,11 +797,184 @@ static void test_http(void)
     m.in = "HTTP/1.1 2x0 OK\r\nContent-Length: 0\r\n\r\n";
     m.len = strlen(m.in);
     m.pos = 0;
-    TEST_CHECK(vjo_http_recv(&A, &c, 100, &resp) == VJO_E_HTTP);
+    TEST_CHECK(vjo_http_recv(&A, &c, 100, &resp) == VJO_E_HTTP && resp.status == 0);
     m.in = "HTTP/1.1 -20 OK\r\nContent-Length: 0\r\n\r\n";
     m.len = strlen(m.in);
     m.pos = 0;
     TEST_CHECK(vjo_http_recv(&A, &c, 100, &resp) == VJO_E_HTTP);
+    /* no body, whatever the headers say */
+    m.in = "HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n";
+    m.len = strlen(m.in);
+    m.pos = 0;
+    TEST_CHECK(vjo_http_recv(&A, &c, 100, &resp) == 0 && resp.body_len == 0 && resp.keep_alive);
+    /* no reply at all (a kept connection the server dropped) */
+    m.in = "";
+    m.len = 0;
+    m.pos = 0;
+    TEST_CHECK(vjo_http_recv(&A, &c, 100, &resp) == VJO_E_HTTP && resp.status == 0);
+}
+
+/* ---------- kept connections (VjoNetPool) over a fake network ---------- */
+
+/* Connection k serves responses[k] (several replies in turn when kept;
+ * NULL = refused) one byte per read, so the reader never reads ahead. */
+typedef struct {
+    const char *responses[4];
+    VjoMemConn conns[4];
+    char hosts[4][32];
+    int n_connects, n_disconnects;
+    int acquire_rc; /* what acquire() reports */
+    uint64_t now;
+} PoolNet;
+
+static int pool_connect(void *ud, const char *host, int port, int timeout_us, int io_timeout_us, VjoConn *out)
+{
+    PoolNet *f = (PoolNet *)ud;
+    int k = f->n_connects;
+    (void)port;
+    (void)timeout_us;
+    (void)io_timeout_us;
+    if (k >= 4 || !f->responses[k])
+        return VJO_E_NET;
+    f->n_connects++;
+    snprintf(f->hosts[k], sizeof(f->hosts[k]), "%s", host);
+    memset(&f->conns[k], 0, sizeof(f->conns[k]));
+    f->conns[k].in = f->responses[k];
+    f->conns[k].len = strlen(f->responses[k]);
+    f->conns[k].step = 1;
+    vjo_memconn_init(&f->conns[k], out);
+    return VJO_OK;
+}
+
+static void pool_disconnect(void *ud, VjoConn *c)
+{
+    (void)c;
+    ((PoolNet *)ud)->n_disconnects++;
+}
+
+static int pool_acquire(void *ud, VjoConn *c)
+{
+    (void)c;
+    return ((PoolNet *)ud)->acquire_rc;
+}
+
+static uint64_t pool_now(void *ud)
+{
+    return ((PoolNet *)ud)->now;
+}
+
+static void pool_net(PoolNet *f, VjoPlatform *p, VjoNetPool *pool, int slots)
+{
+    static uint8_t mem[4][32 * 1024];
+    TEST_ASSERT(vjo_net_pool_size(slots) <= sizeof(mem));
+    memset(f, 0, sizeof(*f));
+    f->now = 1000000;
+    memset(p, 0, sizeof(*p));
+    p->ud = f;
+    p->connect = pool_connect;
+    p->disconnect = pool_disconnect;
+    p->acquire = pool_acquire;
+    p->now_us = pool_now;
+    p->plain_http = 1;
+    vjo_net_pool_init(pool, mem, vjo_net_pool_size(slots), 10000000);
+    p->pool = pool;
+}
+
+#define REPLY1(c) "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n" c
+
+static int pool_get(const VjoPlatform *p, const char *host, const char *expect)
+{
+    VjoHttpRequest req;
+    VjoHttpResponse resp;
+    VjoErr err;
+    int rc;
+    memset(&req, 0, sizeof(req));
+    memset(&err, 0, sizeof(err));
+    req.method = "GET";
+    req.host = host;
+    req.path = "/";
+    rc = vjo_http_request(&A, p, 443, 1, &req, 100, &resp, &err);
+    if (rc == VJO_OK && expect && strcmp(resp.body, expect))
+        return -1;
+    return rc;
+}
+
+static void test_net_pool(void)
+{
+    PoolNet f;
+    VjoPlatform p;
+    VjoNetPool pool;
+    setup();
+
+    /* two requests on one connection */
+    pool_net(&f, &p, &pool, 2);
+    f.responses[0] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nab" "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\ncd";
+    TEST_CHECK(pool_get(&p, "a.example", "ab") == VJO_OK && pool_get(&p, "a.example", "cd") == VJO_OK);
+    TEST_CHECK(f.n_connects == 1 && f.n_disconnects == 0);
+    vjo_net_pool_close(&p);
+    TEST_CHECK(f.n_disconnects == 1);
+
+    /* no reply on the kept connection (the server dropped it): once more
+     * on a new one */
+    pool_net(&f, &p, &pool, 2);
+    f.responses[0] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nab";
+    f.responses[1] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\ncd";
+    TEST_CHECK(pool_get(&p, "a.example", "ab") == VJO_OK && pool_get(&p, "a.example", "cd") == VJO_OK);
+    TEST_CHECK(f.n_connects == 2 && f.n_disconnects == 1);
+
+    /* a reply cut short is an error, not retried */
+    pool_net(&f, &p, &pool, 2);
+    f.responses[0] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nab" "HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\ncd";
+    f.responses[1] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nef";
+    TEST_CHECK(pool_get(&p, "a.example", "ab") == VJO_OK && pool_get(&p, "a.example", NULL) != VJO_OK);
+    TEST_CHECK(f.n_connects == 1 && f.n_disconnects == 1);
+
+    /* the server closed it while idle (acquire says so): a new one */
+    pool_net(&f, &p, &pool, 2);
+    f.responses[0] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nab";
+    f.responses[1] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\ncd";
+    TEST_CHECK(pool_get(&p, "a.example", "ab") == VJO_OK);
+    f.acquire_rc = VJO_E_NET;
+    TEST_CHECK(pool_get(&p, "a.example", "cd") == VJO_OK && f.n_connects == 2 && f.n_disconnects == 1);
+
+    /* cancelled: no request, no new connection, the kept one stays */
+    pool_net(&f, &p, &pool, 2);
+    f.responses[0] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nab";
+    f.responses[1] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\ncd";
+    TEST_CHECK(pool_get(&p, "a.example", "ab") == VJO_OK);
+    f.acquire_rc = VJO_E_CANCELLED;
+    TEST_CHECK(pool_get(&p, "a.example", NULL) == VJO_E_CANCELLED && f.n_connects == 1 && f.n_disconnects == 0);
+
+    /* idle too long: closed, a new one */
+    pool_net(&f, &p, &pool, 2);
+    f.responses[0] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nab" "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nxx";
+    f.responses[1] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\ncd";
+    TEST_CHECK(pool_get(&p, "a.example", "ab") == VJO_OK);
+    f.now += 10000001;
+    TEST_CHECK(pool_get(&p, "a.example", "cd") == VJO_OK && f.n_connects == 2 && f.n_disconnects == 1);
+
+    /* "Connection: close": not kept */
+    pool_net(&f, &p, &pool, 2);
+    f.responses[0] = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nab";
+    f.responses[1] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\ncd";
+    TEST_CHECK(pool_get(&p, "a.example", "ab") == VJO_OK && f.n_disconnects == 1);
+    TEST_CHECK(pool_get(&p, "a.example", "cd") == VJO_OK && f.n_connects == 2);
+
+    /* a third host takes the least recently used slot */
+    pool_net(&f, &p, &pool, 2);
+    f.responses[0] = REPLY1("a") REPLY1("A");
+    f.responses[1] = REPLY1("b");
+    f.responses[2] = REPLY1("c");
+    TEST_CHECK(pool_get(&p, "a.example", "a") == VJO_OK);
+    f.now += 1000;
+    TEST_CHECK(pool_get(&p, "b.example", "b") == VJO_OK);
+    f.now += 1000;
+    TEST_CHECK(pool_get(&p, "a.example", "A") == VJO_OK); /* a is now the more recent */
+    f.now += 1000;
+    TEST_CHECK(pool_get(&p, "c.example", "c") == VJO_OK);
+    TEST_CHECK(f.n_connects == 3 && f.n_disconnects == 1);
+    vjo_net_pool_close(&p);
+    TEST_CHECK(f.n_disconnects == 3);
 }
 
 /* ---------- styled text (ui::Text) ---------- */
@@ -1014,6 +1232,855 @@ static void test_trigger_filter(void)
     TEST_CHECK(trig_filter(&c, h, 0, t + 64000) == 0);
 }
 
+/* ---- change detection (kernel/scene.c) ---- */
+
+#define FRAME_MAX_W 960
+#define FRAME_MAX_H 544
+static uint32_t frame[FRAME_MAX_W * FRAME_MAX_H];
+static uint32_t frame_w, frame_h;
+
+#define DARK  0xFF202020u
+#define WHITE 0xFFFFFFFFu
+#define GLYPH 24
+#define TICK  133000 /* a signature every 8 frames at 60 fps */
+#define NO_INPUT 0   /* no player input (long before the tests' clock) */
+
+static void frame_new(uint32_t w, uint32_t h)
+{
+    frame_w = w;
+    frame_h = h;
+    for (uint32_t i = 0; i < w * h; i++)
+        frame[i] = DARK;
+}
+
+static void frame_rect(uint32_t x, uint32_t y, uint32_t rw, uint32_t rh, uint32_t color)
+{
+    for (uint32_t r = y; r < y + rh; r++)
+        for (uint32_t c = x; c < x + rw; c++)
+            frame[r * frame_w + c] = color;
+}
+
+/* A made-up glyph: about a third of its pixels inked, by seed. Glyphs of
+ * different seeds have the same ink density, so a line swap keeps each
+ * cell's brightness and only the pixels differ. */
+static void frame_glyph(uint32_t x, uint32_t y, uint32_t seed)
+{
+    uint32_t v = seed * 2654435761u + 1;
+    for (uint32_t r = 0; r < GLYPH; r++)
+        for (uint32_t c = 0; c < GLYPH; c++) {
+            v = v * 1103515245u + 12345u;
+            frame[(y + r) * frame_w + x + c] = (v >> 16) % 3 == 0 ? WHITE : DARK;
+        }
+}
+
+static void frame_text(uint32_t x, uint32_t y, uint32_t seed, int n)
+{
+    for (int i = 0; i < n; i++)
+        frame_glyph(x + (uint32_t)i * GLYPH, y, seed + (uint32_t)i);
+}
+
+static SceneSig frame_sig(void)
+{
+    static SceneAcc acc;
+    SceneSig sig;
+    scene_acc_begin(&acc, &sig, frame_w, frame_h);
+    for (uint32_t y = 0; y < frame_h; y++)
+        scene_acc_row(&acc, y, &frame[y * frame_w]); /* unsampled rows are skipped */
+    return sig;
+}
+
+/* Feeds sig until the screen settles; returns the ticks it took (0: never
+ * within max). */
+static int settle(SceneTracker *t, const SceneSig *sig, int64_t *now, int max)
+{
+    for (int i = 1; i <= max; i++)
+        if (scene_update(t, sig, *now += TICK, NO_INPUT, NO_INPUT) == SCENE_SETTLED)
+            return i;
+    return 0;
+}
+
+static void test_scene_grid(void)
+{
+    SceneAcc acc;
+    SceneSig sig;
+    memset(&acc, 0, sizeof(acc));
+    scene_acc_begin(&acc, &sig, 960, 544);
+    TEST_CHECK(acc.cols == 16 && acc.ystep == 16 && acc.xstep == 4);
+    scene_acc_begin(&acc, &sig, 900, 120); /* a text box: 32x4 */
+    TEST_CHECK(acc.cols == 32 && acc.y0[4] == 120);
+    scene_acc_begin(&acc, &sig, 32, 32);
+    TEST_CHECK(acc.ystep == 1 && acc.xstep == 1);
+    /* every grid row gets a sampled row */
+    for (uint32_t h = 32; h <= 544; h += 7) {
+        scene_acc_begin(&acc, &sig, 960, h);
+        for (uint32_t r = 0; acc.y0[r] < h; r++)
+            TEST_CHECK(acc.y0[r + 1] - acc.y0[r] >= acc.ystep);
+    }
+}
+
+static void test_scene_changes(void)
+{
+    SceneTracker t;
+    SceneSig a, b, sig;
+    int64_t now = 1000000;
+    uint32_t id;
+    memset(&t, 0, sizeof(t));
+
+    /* the first frame is a new screen; it settles once, after the window */
+    frame_new(960, 544);
+    frame_text(40, 420, 100, 12);
+    a = frame_sig();
+    TEST_CHECK(scene_update(&t, &a, now, NO_INPUT, NO_INPUT) == 0 && t.id == 1 && !t.stable);
+    TEST_CHECK(settle(&t, &a, &now, 10) == 3);
+    TEST_CHECK(t.stable && scene_unsettled_us(&t, now) == 0);
+    TEST_CHECK(scene_update(&t, &a, now += TICK, NO_INPUT, NO_INPUT) == 0);
+
+    /* another line of the same length and ink: a new screen, and a capture
+     * of the previous line (taken just before) does not match it */
+    frame_new(960, 544);
+    frame_text(40, 420, 200, 12);
+    b = frame_sig();
+    TEST_CHECK(scene_update(&t, &b, now += TICK, NO_INPUT, NO_INPUT) == 0 && t.id == 2 && !t.stable);
+    TEST_CHECK(scene_match(&t, &a) == 0 && scene_match(&t, &b) == 2);
+
+    /* a two-glyph reply replaced by another one, a line per 0.4 s */
+    frame_new(960, 544);
+    frame_text(40, 420, 300, 2);
+    sig = frame_sig();
+    scene_update(&t, &sig, now += 400000, NO_INPUT, NO_INPUT);
+    id = t.id;
+    frame_new(960, 544);
+    frame_text(40, 420, 400, 2);
+    sig = frame_sig();
+    TEST_CHECK(scene_update(&t, &sig, now += 400000, NO_INPUT, NO_INPUT) == 0 && t.id == id + 1);
+
+    /* a different grid (resolution or region): a new screen */
+    frame_new(480, 272);
+    sig = frame_sig();
+    TEST_CHECK(scene_match(&t, &sig) == 0);
+    TEST_CHECK(scene_update(&t, &sig, now += TICK, NO_INPUT, NO_INPUT) == 0 && t.id == id + 2);
+
+    /* a reset keeps the numbering: an old number never matches again */
+    id = t.id;
+    scene_reset(&t);
+    TEST_CHECK(scene_match(&t, &sig) == 0);
+    TEST_CHECK(scene_update(&t, &sig, now += TICK, NO_INPUT, NO_INPUT) == 0 && t.id == id + 1);
+}
+
+/* A text box (900x120: 32x4 cells of about 28x30 px). */
+#define ARROW_X 846 /* inside one cell */
+#define ARROW_Y 92
+
+static SceneSig box_with_line(uint32_t seed, uint32_t arrow)
+{
+    frame_new(900, 120);
+    frame_text(20, 10, seed, 20);
+    if (arrow)
+        frame_rect(ARROW_X, ARROW_Y, 20, 20, arrow);
+    return frame_sig();
+}
+
+/* Feeds an icon cycling through n states (one per `every` signatures)
+ * for `ticks` signatures; returns how often the screen settled. */
+static int run_icon(SceneTracker *t, const SceneSig *states, int n, int every, int ticks, int64_t *now)
+{
+    int settled = 0;
+    for (int i = 0; i < ticks; i++)
+        settled += scene_update(t, &states[i / every % n], *now += TICK, NO_INPUT, NO_INPUT) == SCENE_SETTLED;
+    return settled;
+}
+
+/* The "next" arrow blinks (about 0.5 s on, 0.5 s off). Its first
+ * appearance is a new state, which settles like any change; once it goes
+ * back to a recent state, settling waits until it has blinked for
+ * SCENE_ANIM_SPAN_US and is masked, then the screen settles for good; a
+ * capture with it on or off is the screen. */
+static void test_scene_blinking(void)
+{
+    SceneTracker t;
+    SceneSig st[2] = {box_with_line(100, WHITE), box_with_line(100, 0)};
+    int64_t now = 1000000;
+    uint32_t id;
+    memset(&t, 0, sizeof(t));
+
+    scene_update(&t, &st[1], now, NO_INPUT, NO_INPUT);
+    TEST_CHECK(settle(&t, &st[1], &now, 10) == 3);
+    TEST_CHECK(run_icon(&t, st, 2, 4, 24, &now) == 2); /* 3.2 s */
+    id = t.id;
+    TEST_CHECK(t.stable && t.masked == 1);
+    TEST_CHECK(run_icon(&t, st, 2, 4, 40, &now) == 0 && t.id == id);
+    TEST_CHECK(scene_match(&t, &st[0]) == id && scene_match(&t, &st[1]) == id);
+
+    /* a slow blink (1 s on, 1 s off) is masked too */
+    memset(&t, 0, sizeof(t));
+    scene_update(&t, &st[1], now, NO_INPUT, NO_INPUT);
+    TEST_CHECK(run_icon(&t, st, 2, 8, 40, &now) == 2 && t.masked == 1);
+}
+
+/* An icon with many states (bobbing, color cycle) changes every signature. */
+static void test_scene_animated_icon(void)
+{
+    static const uint32_t colors[6] = {0xFF0000FFu, 0xFF00FF00u, 0xFFFF0000u,
+                                       0xFF00FFFFu, 0xFFFF00FFu, 0xFFFFFF00u};
+    SceneTracker t;
+    SceneSig st[6];
+    int64_t now = 1000000;
+    uint32_t id;
+    memset(&t, 0, sizeof(t));
+
+    for (int k = 0; k < 6; k++)
+        st[k] = box_with_line(100, colors[k]);
+    TEST_CHECK(run_icon(&t, st, 6, 1, 24, &now) == 1); /* revisits from the 7th state */
+    id = t.id;
+    TEST_CHECK(run_icon(&t, st, 6, 1, 40, &now) == 0 && t.id == id && t.masked == 1);
+
+    /* the next line under the still blinking icon: a change */
+    {
+        SceneSig next[6];
+        for (int k = 0; k < 6; k++) {
+            next[k] = box_with_line(200, colors[k]);
+        }
+        TEST_CHECK(scene_update(&t, &next[0], now += TICK, NO_INPUT, NO_INPUT) == 0 && t.id == id + 1);
+    }
+}
+
+/* The icon stops in another state than the screen's first frame: once its
+ * mask ends, that is a change (whatever the mask hid is seen). */
+static void test_scene_mask_expires(void)
+{
+    SceneTracker t;
+    SceneSig st[2] = {box_with_line(100, WHITE), box_with_line(100, 0)};
+    int64_t now = 1000000;
+    uint32_t id;
+    int ticks = 0;
+    memset(&t, 0, sizeof(t));
+
+    scene_update(&t, &st[0], now, NO_INPUT, NO_INPUT);
+    run_icon(&t, st, 2, 4, 30, &now); /* ends on st[1] */
+    id = t.id;
+    TEST_CHECK(t.masked == 1 && scene_match(&t, &st[1]) == id);
+    while (t.id == id && ticks++ < 30)
+        scene_update(&t, &st[1], now += TICK, NO_INPUT, NO_INPUT);
+    TEST_CHECK(t.id == id + 1 && t.masked == 0);
+    TEST_CHECK((int64_t)ticks * TICK <= SCENE_ANIM_GAP_US + 2 * TICK);
+}
+
+/* An animated background: too many cells to mask, so nothing is masked
+ * (it would hide the text) and it never settles. */
+static void test_scene_animated_background(void)
+{
+    SceneTracker t;
+    SceneSig st[3];
+    int64_t now = 1000000;
+    memset(&t, 0, sizeof(t));
+
+    for (int k = 0; k < 3; k++) {
+        frame_new(960, 544);
+        frame_rect(0, 0, 960, 200, 0xFF000000u + (uint32_t)k * 40);
+        frame_text(40, 420, 100, 12);
+        st[k] = frame_sig();
+    }
+    TEST_CHECK(run_icon(&t, st, 3, 1, 60, &now) == 0);
+    TEST_CHECK(t.masked == 0 && scene_unsettled_us(&t, now) >= 59 * TICK);
+}
+
+/* Going back to the previous screen is a change, however small: a menu
+ * cursor moved to item B and back to A must not keep B's number. It settles
+ * once it is clear that this is no animation. */
+static void test_scene_revert(void)
+{
+    SceneTracker t;
+    SceneSig st[2];
+    int64_t now = 1000000;
+    uint32_t id;
+    int ticks;
+    memset(&t, 0, sizeof(t));
+
+    for (uint32_t k = 0; k < 2; k++) {
+        frame_new(960, 544);
+        frame_text(40, 420, 100 + k * 100, 2);
+        st[k] = frame_sig();
+    }
+    scene_update(&t, &st[0], now, NO_INPUT, NO_INPUT);
+    TEST_CHECK(settle(&t, &st[0], &now, 10) == 3);
+    scene_update(&t, &st[1], now += TICK, NO_INPUT, NO_INPUT);
+    TEST_CHECK(settle(&t, &st[1], &now, 10) == 3);
+    id = t.id;
+    TEST_CHECK(scene_update(&t, &st[0], now += TICK, NO_INPUT, NO_INPUT) == 0 && t.id == id + 1);
+    TEST_CHECK(scene_match(&t, &st[0]) == id + 1 && scene_match(&t, &st[1]) == 0);
+    /* an icon-sized revert waits until it is clear it is no blink */
+    ticks = settle(&t, &st[0], &now, 20);
+    TEST_CHECK(ticks > 3 && (int64_t)ticks * TICK <= SCENE_ANIM_GAP_US + 2 * TICK);
+
+    /* moved back and forth for seconds: that is masked like an icon, but
+     * once it stops, the mask ends and that is a change */
+    run_icon(&t, st, 2, 3, 30, &now); /* ends on st[1] */
+    id = t.id;
+    TEST_CHECK(t.masked == 2); /* the two glyphs' cells */
+    ticks = 0;
+    while (t.id == id && ticks++ < 30)
+        scene_update(&t, &st[1], now += TICK, NO_INPUT, NO_INPUT);
+    TEST_CHECK(t.id == id + 1 && scene_match(&t, &st[1]) == t.id && scene_match(&t, &st[0]) == 0);
+}
+
+/* A menu scrolled up and down for seconds, a press per item: changes the
+ * player causes are never animation, so stopping on an item is a change at
+ * once and a capture taken while scrolling does not match it. Item texts
+ * of n glyphs (1 glyph: one cell, like an icon). */
+static void menu_scroll(uint32_t glyphs)
+{
+    SceneTracker t;
+    SceneSig item[4];
+    int64_t now = 1000000;
+    uint32_t id;
+    memset(&t, 0, sizeof(t));
+
+    for (uint32_t k = 0; k < 4; k++) {
+        frame_new(960, 544);
+        frame_text(40, 420, 100 + k * 50, (int)glyphs);
+        item[k] = frame_sig();
+    }
+    scene_update(&t, &item[0], now, NO_INPUT, NO_INPUT);
+    for (int step = 0; step < 12; step++) { /* 0.4 s per item, 4.8 s */
+        int k = step % 6 < 3 ? step % 6 : 6 - step % 6; /* 0 1 2 3 2 1 0 ... */
+        int64_t pressed = now + TICK / 2;
+        for (int i = 0; i < 3; i++) {
+            scene_update(&t, &item[k], now += TICK, pressed, pressed);
+            TEST_CHECK(t.masked == 0);
+        }
+    }
+    id = t.id; /* scrolling ended on item 1: stop on item 3 */
+    TEST_CHECK(scene_match(&t, &item[1]) == id);
+    now += TICK;
+    TEST_CHECK(scene_update(&t, &item[3], now, now - TICK / 2, now - TICK / 2) == 0 && t.id == id + 1);
+    TEST_CHECK(scene_match(&t, &item[3]) == t.id && scene_match(&t, &item[1]) == 0);
+
+    /* wiggled 3, 2, 3, 2 right after: each step is a change */
+    for (int i = 0; i < 4; i++) {
+        id = t.id;
+        now += 3 * TICK;
+        TEST_CHECK(scene_update(&t, &item[i % 2 ? 3 : 2], now, now - TICK / 2, now - TICK / 2) == 0);
+        TEST_CHECK(t.id == id + 1 && t.masked == 0);
+    }
+}
+
+static void test_scene_menu_scroll(void)
+{
+    menu_scroll(12); /* descriptions */
+    menu_scroll(1);  /* one-glyph names: 剣, 槍, 斧, 弓 */
+}
+
+/* The documented gap: a menu cycled with no input recorded (it advances by
+ * itself, or reacts later than SCENE_INPUT_US) is masked like an icon, and
+ * the stop is seen once the mask ends. */
+static void test_scene_menu_without_input(void)
+{
+    SceneTracker t;
+    SceneSig item[2];
+    int64_t now = 1000000;
+    uint32_t id;
+    int ticks = 0;
+    memset(&t, 0, sizeof(t));
+
+    for (uint32_t k = 0; k < 2; k++) {
+        frame_new(960, 544);
+        frame_text(10, 420, 100 + k * 50, 1); /* inside one cell */
+        item[k] = frame_sig();
+    }
+    scene_update(&t, &item[0], now, NO_INPUT, NO_INPUT);
+    run_icon(&t, item, 2, 3, 30, &now); /* ends on item 1 */
+    id = t.id;
+    TEST_CHECK(t.masked == 1 && scene_match(&t, &item[0]) == id);
+    while (t.id == id && ticks++ < 30)
+        scene_update(&t, &item[1], now += TICK, NO_INPUT, NO_INPUT);
+    TEST_CHECK(t.id == id + 1 && (int64_t)ticks * TICK <= SCENE_ANIM_GAP_US + 2 * TICK);
+    TEST_CHECK(scene_match(&t, &item[0]) == 0);
+}
+
+/* A held button (no edge after the press) keeps a masked icon masked; a
+ * press or release ends the masks (a change), and the icon is masked again
+ * once it cycles. */
+static void test_scene_input_and_masks(void)
+{
+    SceneTracker t;
+    SceneSig st[2] = {box_with_line(100, WHITE), box_with_line(100, 0)};
+    int64_t now = 1000000, edge;
+    uint32_t id;
+    int settled = 0;
+    memset(&t, 0, sizeof(t));
+
+    scene_update(&t, &st[1], now, NO_INPUT, NO_INPUT);
+    run_icon(&t, st, 2, 4, 24, &now);
+    id = t.id;
+    TEST_CHECK(t.masked == 1 && t.stable);
+    edge = now + TICK / 2; /* pressed, then held for 5 s */
+    for (int i = 0; i < 40; i++) {
+        now += TICK;
+        settled += scene_update(&t, &st[i / 4 % 2], now, now - edge <= 1500000 ? now : edge + 1500000, edge) == SCENE_SETTLED;
+        if (i == 0)
+            TEST_CHECK(t.id == id + 1 && t.masked == 0); /* the press */
+    }
+    /* the blinks in the held-input window are the player's: a few settles
+     * until it is masked again */
+    id = t.id;
+    TEST_CHECK(t.masked == 1 && t.stable && settled <= 5);
+    settled = 0;
+    for (int i = 0; i < 24; i++)
+        settled += scene_update(&t, &st[i / 4 % 2], now += TICK, edge + 1500000, edge) == SCENE_SETTLED;
+    TEST_CHECK(t.id == id && settled == 0);
+}
+
+/* A short wrapping menu scrolled by a held button for 5 s (auto-repeat
+ * past the held-input window: masked like an icon), then tapped back: each
+ * tap is seen, and so is the release without taps. */
+static void test_scene_held_scroll(void)
+{
+    SceneTracker t;
+    SceneSig item[4];
+    int64_t now = 1000000, edge;
+    int k = 0;
+    memset(&t, 0, sizeof(t));
+
+    for (uint32_t n = 0; n < 4; n++) {
+        frame_new(960, 544);
+        frame_text(10, 420, 100 + n * 50, 1);
+        item[n] = frame_sig();
+    }
+    scene_update(&t, &item[0], now, NO_INPUT, NO_INPUT);
+    edge = now + TICK / 2;
+    for (int i = 0; i < 38; i++) { /* an item per 2 signatures */
+        if (i % 2 == 0)
+            k = (k + 1) % 4;
+        now += TICK;
+        scene_update(&t, &item[k], now, now - edge <= 1500000 ? now : edge + 1500000, edge);
+    }
+    TEST_CHECK(t.masked == 1); /* the documented held-scroll residual */
+    for (int tap = 0; tap < 2; tap++) { /* released, then tapped back twice */
+        uint32_t id = t.id;
+        edge = now + TICK / 2;
+        k = (k + 3) % 4;
+        now += 2 * TICK;
+        scene_update(&t, &item[k], now, edge, edge);
+        TEST_CHECK(t.id > id && t.masked == 0);
+        TEST_CHECK(scene_match(&t, &item[k]) == t.id && scene_match(&t, &item[(k + 1) % 4]) == 0);
+    }
+}
+
+/* Two icons blinking at different rates (the "next" arrow and an AUTO
+ * mark): both are masked and the screen settles for good. */
+static void test_scene_two_icons(void)
+{
+    SceneTracker t;
+    SceneSig st[4];
+    int64_t now = 1000000;
+    int settled = 0;
+    memset(&t, 0, sizeof(t));
+
+    for (int k = 0; k < 4; k++) {
+        frame_new(900, 120);
+        frame_text(20, 10, 100, 20);
+        if (k & 1)
+            frame_rect(ARROW_X, ARROW_Y, 20, 20, WHITE);
+        if (k & 2)
+            frame_rect(2, 92, 20, 20, WHITE); /* inside the first cell */
+        st[k] = frame_sig();
+    }
+    for (int i = 0; i < 40; i++) /* the arrow every 4 signatures, AUTO every 6 */
+        settled += scene_update(&t, &st[(i / 4 % 2) | (i / 6 % 2) << 1], now += TICK, NO_INPUT, NO_INPUT) == SCENE_SETTLED;
+    TEST_CHECK(t.masked == 2 && t.stable && settled <= 3);
+    settled = 0;
+    for (int i = 40; i < 120; i++)
+        settled += scene_update(&t, &st[(i / 4 % 2) | (i / 6 % 2) << 1], now += TICK, NO_INPUT, NO_INPUT) == SCENE_SETTLED;
+    TEST_CHECK(settled == 0 && t.masked == 2);
+}
+
+/* A line replaced by a shorter one: its tail goes back to empty cells
+ * (states seen before), which is no animation: it settles as usual. */
+static void test_scene_shorter_line(void)
+{
+    SceneTracker t;
+    SceneSig line_long, line_short;
+    int64_t now = 1000000;
+    memset(&t, 0, sizeof(t));
+
+    frame_new(960, 544);
+    line_long = frame_sig();
+    scene_update(&t, &line_long, now, NO_INPUT, NO_INPUT);
+    frame_text(40, 420, 100, 12);
+    line_long = frame_sig();
+    scene_update(&t, &line_long, now += TICK, NO_INPUT, NO_INPUT);
+    TEST_CHECK(settle(&t, &line_long, &now, 10) == 3);
+    frame_new(960, 544);
+    frame_text(40, 420, 200, 3);
+    line_short = frame_sig();
+    scene_update(&t, &line_short, now += TICK, NO_INPUT, NO_INPUT);
+    TEST_CHECK(settle(&t, &line_short, &now, 10) == 3);
+}
+
+/* The next line's arrow, soon after the last one's mask ended (it was
+ * hidden while the line was typed): masked as soon as it cycles. */
+static void test_scene_warm_mask(void)
+{
+    SceneTracker t;
+    SceneSig st[2] = {box_with_line(100, WHITE), box_with_line(100, 0)};
+    SceneSig next[2] = {box_with_line(200, WHITE), box_with_line(200, 0)};
+    int64_t now = 1000000;
+    int settled = 0, ticks = 0;
+    memset(&t, 0, sizeof(t));
+
+    scene_update(&t, &st[1], now, NO_INPUT, NO_INPUT);
+    run_icon(&t, st, 2, 4, 24, &now);
+    TEST_CHECK(t.masked == 1);
+    while (t.masked && ticks++ < 30) /* the next line, typed for 2 s */
+        scene_update(&t, &next[1], now += TICK, NO_INPUT, NO_INPUT);
+    run_icon(&t, &next[1], 1, 1, 13, &now);
+    settled = run_icon(&t, next, 2, 4, 14, &now); /* on, off, on, off */
+    TEST_CHECK(t.masked == 1 && t.stable);
+    TEST_CHECK(settled <= 1);
+    TEST_CHECK(run_icon(&t, next, 2, 4, 16, &now) == 0);
+}
+
+/* Short lines (two glyphs) faded in and out over 4 signatures each, shown
+ * 0.8 s: every line is a new screen that settles, and a capture of one
+ * never matches another. (Once their cells are masked as cycling, a line
+ * is seen when it has held SCENE_STABLE_US.) */
+static void test_scene_fades(void)
+{
+    static const uint32_t levels[4] = {0xFF404040u, 0xFF808080u, 0xFFC0C0C0u, WHITE};
+    SceneTracker t;
+    SceneSig sig, prev;
+    int64_t now = 1000000;
+    memset(&t, 0, sizeof(t));
+
+    frame_new(960, 544);
+    sig = prev = frame_sig();
+    scene_update(&t, &sig, now, NO_INPUT, NO_INPUT);
+    for (uint32_t line = 0; line < 8; line++) {
+        for (int step = 0; step < 4; step++) { /* fade in */
+            frame_new(960, 544);
+            frame_text(40, 420, 100 + line * 10, 2);
+            for (uint32_t p = 0; p < 960 * 544; p++)
+                if (frame[p] == WHITE)
+                    frame[p] = levels[step];
+            sig = frame_sig();
+            scene_update(&t, &sig, now += TICK, NO_INPUT, NO_INPUT);
+        }
+        /* masked as cycling from the third line: held SCENE_STABLE_US, then settled */
+        TEST_CHECK(settle(&t, &sig, &now, 8) == (line < 2 ? 3 : 6));
+        TEST_CHECK(scene_match(&t, &sig) == t.id && scene_match(&t, &prev) == 0);
+        prev = sig;
+        for (int step = 3; step >= 0; step--) { /* fade out */
+            frame_new(960, 544);
+            frame_text(40, 420, 100 + line * 10, 2);
+            for (uint32_t p = 0; p < 960 * 544; p++)
+                if (frame[p] == WHITE)
+                    frame[p] = step ? levels[step - 1] : DARK;
+            sig = frame_sig();
+            scene_update(&t, &sig, now += TICK, NO_INPUT, NO_INPUT);
+        }
+    }
+}
+
+/* Typewriter text: each glyph is a change, a pause shorter than the window
+ * does not settle it, and it settles a window after the last glyph. */
+static void test_scene_typewriter(void)
+{
+    SceneTracker t;
+    SceneSig sig;
+    int64_t now = 1000000, started;
+    memset(&t, 0, sizeof(t));
+
+    frame_new(900, 120);
+    sig = frame_sig();
+    scene_update(&t, &sig, now, NO_INPUT, NO_INPUT);
+    TEST_CHECK(settle(&t, &sig, &now, 10) == 3);
+    started = now + TICK;
+    for (int i = 0; i < 16; i++) {
+        uint32_t id = t.id;
+        frame_glyph(20 + (uint32_t)i * GLYPH, 10, 100 + (uint32_t)i);
+        sig = frame_sig();
+        TEST_CHECK(scene_update(&t, &sig, now += TICK, NO_INPUT, NO_INPUT) == 0 && t.id == id + 1);
+        if (i == 7) /* a pause after a comma: 2 ticks < SCENE_STABLE_US */
+            TEST_CHECK(settle(&t, &sig, &now, 2) == 0);
+    }
+    TEST_CHECK(scene_unsettled_us(&t, now) == now - started);
+    TEST_CHECK(settle(&t, &sig, &now, 10) == 3);
+}
+
+/* A VN text box (a PSP game's, 458x64) whose "next" mark spins after the
+ * last glyph: 8 frames (widths of a turn, the back shaded), 4 game frames
+ * each, sampled every 9, in other cells on every line. The first line
+ * settles once the mark is masked (SCENE_ANIM_SPAN_US); later lines
+ * sooner, a mask being recent; none changes again until the next press,
+ * so a result taken when it settles stays current. */
+static void spinning_mark(uint32_t x, uint32_t y, uint32_t f)
+{
+    static const uint32_t width[8] = {14, 12, 8, 5, 2, 5, 8, 12};
+    uint32_t ph = f / 4 % 8, w = width[ph];
+    frame_rect(x + (15 - w) / 2, y, w, 15, 0xFFC060FFu);
+    if (ph > 4)
+        frame_rect(x + (15 - w) / 2, y + 3, w / 2, 4, 0xFF9040C0u);
+    else
+        frame_rect(x + 7, y + 3, w / 2, 4, 0xFFE0A0FFu);
+}
+
+/* The mark read while the game draws the next frame: its rows from `split`
+ * down are still the previous frame's. */
+static void torn_mark(uint32_t x, uint32_t y, uint32_t f, uint32_t split)
+{
+    static uint32_t top[15][16];
+    spinning_mark(x, y, f);
+    for (uint32_t r = 0; r < split; r++)
+        for (uint32_t c = 0; c < 16; c++)
+            top[r][c] = frame[(y + r) * frame_w + x + c];
+    frame_rect(x, y, 16, 15, DARK);
+    spinning_mark(x, y, f - 4);
+    for (uint32_t r = 0; r < split; r++)
+        for (uint32_t c = 0; c < 16; c++)
+            frame[(y + r) * frame_w + x + c] = top[r][c];
+}
+
+static void test_scene_spinning_mark(void)
+{
+    SceneTracker t;
+    SceneSig sig;
+    int64_t now = 100000000; /* not warm at the start */
+    uint32_t f = 0;
+    memset(&t, 0, sizeof(t));
+
+    for (uint32_t line = 0; line < 8; line++) {
+        int64_t press = now += TICK;
+        uint32_t n = 6 + line * 5 % 12, settled = 0, id = 0;
+        for (uint32_t i = 1; i <= n; i++, now += TICK) { /* typed, a glyph per signature */
+            frame_new(458, 64);
+            frame_text(4, 4 + line % 2 * 30, 100 * line, (int)i);
+            sig = frame_sig();
+            scene_update(&t, &sig, now, press, press);
+        }
+        for (uint32_t k = 1; k <= 45; k++, now += TICK, f += 9) { /* read for 6 s */
+            frame_new(458, 64);
+            frame_text(4, 4 + line % 2 * 30, 100 * line, (int)n);
+            spinning_mark(6 + n * GLYPH, 8 + line % 2 * 30, f);
+            sig = frame_sig();
+            if (scene_update(&t, &sig, now, press, press) == SCENE_SETTLED) {
+                TEST_CHECK(!settled);
+                settled = k;
+                id = t.id;
+            }
+        }
+        TEST_CHECK(settled && settled * TICK < (line ? SCENE_ANIM_SPAN_US : SCENE_ANIM_SPAN_US + 1000000));
+        TEST_CHECK(line || settled * TICK >= SCENE_ANIM_SPAN_US);
+        TEST_MSG("line %u settled after %u signatures", line, settled);
+        TEST_CHECK(t.id == id && t.stable && t.masked >= 1);
+    }
+}
+
+/* The spinning mark on a game whose frame is read while it draws (the PSP
+ * emulator): a third of the reads mix two frames, at any row, so the mark
+ * keeps showing states its cells have not seen. Once masked, it stays
+ * masked: the line settles once and keeps its scene. */
+static void test_scene_torn_mark(void)
+{
+    SceneTracker t;
+    SceneSig sig;
+    int64_t now = 100000000;
+    uint32_t f = 0, v = 1;
+    memset(&t, 0, sizeof(t));
+
+    for (uint32_t line = 0; line < 6; line++) {
+        int64_t press = now += TICK;
+        uint32_t n = 8 + line * 3, settles = 0, id = 0;
+        for (uint32_t k = 1; k <= 60; k++, now += TICK, f += 8) { /* 8 s */
+            frame_new(458, 64);
+            frame_text(4, 4, 100 * line, (int)n);
+            v = v * 1103515245u + 12345u;
+            if (v >> 16 & 1 && (v >> 17) % 3 == 0)
+                torn_mark(6 + n * GLYPH, 8, f, 1 + (v >> 20) % 14);
+            else
+                spinning_mark(6 + n * GLYPH, 8, f);
+            sig = frame_sig();
+            if (scene_update(&t, &sig, now, press, press) == SCENE_SETTLED) {
+                settles++;
+                id = t.id;
+            }
+        }
+        TEST_CHECK(settles == 1 && t.id == id && t.masked >= 1);
+        TEST_MSG("line %u: settled %u times, masked %d", line, settles, t.masked);
+    }
+}
+
+/* The spinning mark, read whole or torn: the screen is quiet (worth
+ * capturing) well before it settles, never while a line is typed. A
+ * capture taken once quiet shows the screen from then on, through the
+ * mask and the settle; one of the line still being typed never does. */
+static void test_scene_quiet_mark(void)
+{
+    SceneTracker t;
+    SceneSig sig, cap, part;
+    int64_t now = 100000000, cap_us = 0, part_us = 0;
+    uint32_t f = 0, v = 1;
+    memset(&t, 0, sizeof(t));
+
+    for (uint32_t line = 0; line < 8; line++) {
+        int64_t press = now += TICK;
+        uint32_t n = 6 + line * 5 % 12, quiet = 0, settled = 0, typing_quiet = 0, lost = 0;
+        int torn = line >= 4;
+        for (uint32_t i = 1; i <= n; i++, now += TICK) {
+            frame_new(458, 64);
+            frame_text(4, 4 + line % 2 * 30, 100 * line, (int)i);
+            sig = frame_sig();
+            typing_quiet += scene_update(&t, &sig, now, press, press) == SCENE_QUIET;
+            if (i == 1 && line) /* the last line's capture */
+                TEST_CHECK(scene_match_since(&t, &cap, cap_us) == 0);
+            if (i == n - 1) {
+                part = sig;
+                part_us = now;
+            }
+        }
+        for (uint32_t k = 1; k <= 45; k++, now += TICK, f += 9) {
+            int r;
+            frame_new(458, 64);
+            frame_text(4, 4 + line % 2 * 30, 100 * line, (int)n);
+            v = v * 1103515245u + 12345u;
+            if (torn && v >> 16 & 1 && (v >> 17) % 3 == 0)
+                torn_mark(6 + n * GLYPH, 8 + line % 2 * 30, f, 1 + (v >> 20) % 14);
+            else
+                spinning_mark(6 + n * GLYPH, 8 + line % 2 * 30, f);
+            sig = frame_sig();
+            r = scene_update(&t, &sig, now, press, press);
+            if (r == 2 && !quiet) {
+                quiet = k;
+                cap = sig;
+                cap_us = now;
+            }
+            if (r == 1 && !settled)
+                settled = k;
+            if (quiet && k > quiet)
+                lost += scene_match_since(&t, &cap, cap_us) != t.id;
+            TEST_CHECK(scene_match_since(&t, &part, part_us) == 0);
+        }
+        TEST_CHECK(!typing_quiet && quiet && settled && quiet < settled);
+        TEST_MSG("line %u: quiet after %u signatures, settled after %u, quiet while typed %u", line, quiet,
+                 settled, typing_quiet);
+        TEST_CHECK(quiet <= 8); /* a torn read can delay it */
+        TEST_CHECK(!lost);
+        TEST_MSG("line %u: the capture did not show the screen %u times", line, lost);
+    }
+}
+
+/* Typing never makes the screen quiet, however slow (a glyph every 3
+ * signatures: within one spot for 400 ms, but only ever new states). */
+static void test_scene_quiet_typing(void)
+{
+    SceneTracker t;
+    SceneSig sig;
+    int64_t now = 100000000;
+    int quiet = 0;
+    memset(&t, 0, sizeof(t));
+    for (int i = 1; i <= 16 * 3; i++) {
+        frame_new(458, 64);
+        frame_text(4, 4, 7, (i + 2) / 3);
+        sig = frame_sig();
+        quiet += scene_update(&t, &sig, now += TICK, NO_INPUT, NO_INPUT) == SCENE_QUIET;
+    }
+    TEST_CHECK(!quiet);
+}
+
+/* A "next" mark blinking at a fixed spot, the line typed up to it (not
+ * the player's doing after SCENE_INPUT_US): the glyphs next to the masked
+ * mark are changes, the screen settles with the whole line only. */
+static void test_scene_text_next_to_mark(void)
+{
+    SceneTracker t;
+    SceneSig sig, settled_sig;
+    int64_t now = 100000000, press;
+    int settled_glyphs = 0;
+    memset(&t, 0, sizeof(t));
+
+    for (int k = 0; k < 45; k++, now += TICK) {
+        frame_new(960, 544);
+        frame_text(40, 420, 100, 30);
+        if (k / 4 % 2)
+            frame_rect(910, 490, 20, 20, WHITE);
+        sig = frame_sig();
+        scene_update(&t, &sig, now, NO_INPUT, NO_INPUT);
+    }
+    TEST_CHECK(t.masked >= 1);
+    press = now;
+    for (int i = 2; i <= 2 * 36 + 20; i++, now += TICK) { /* 36 glyphs, 2 signatures each */
+        int g = i / 2 < 36 ? i / 2 : 36;
+        frame_new(960, 544);
+        frame_text(40, 470, 300, g);
+        if (i / 4 % 2)
+            frame_rect(910, 490, 20, 20, WHITE);
+        sig = frame_sig();
+        if (scene_update(&t, &sig, now, press, press) == SCENE_SETTLED) {
+            settled_glyphs = g;
+            settled_sig = sig;
+        }
+    }
+    TEST_CHECK(settled_glyphs == 36);
+    TEST_MSG("settled with %d glyphs", settled_glyphs);
+    TEST_CHECK(scene_match(&t, &settled_sig) == t.id);
+}
+
+/* An icon two cells wide, blinking, then replaced by a glyph (no input):
+ * the glyph is new content once it has held SCENE_STABLE_US. */
+static void test_scene_content_in_icon(void)
+{
+    SceneTracker t;
+    SceneSig sig;
+    int64_t now = 100000000;
+    uint32_t id;
+    int ticks = 0;
+    memset(&t, 0, sizeof(t));
+
+    for (int k = 0; k < 40; k++, now += TICK) {
+        frame_new(900, 120);
+        frame_text(20, 10, 100, 20);
+        if (k / 4 % 2)
+            frame_rect(830, 92, 30, 20, WHITE);
+        sig = frame_sig();
+        scene_update(&t, &sig, now, NO_INPUT, NO_INPUT);
+    }
+    TEST_CHECK(t.masked >= 1 && t.stable);
+    id = t.id;
+    frame_new(900, 120);
+    frame_text(20, 10, 100, 20);
+    frame_glyph(830, 92, 999);
+    sig = frame_sig();
+    while (t.id == id && ticks++ < 20)
+        scene_update(&t, &sig, now += TICK, NO_INPUT, NO_INPUT);
+    TEST_CHECK(t.id != id && ticks * TICK <= SCENE_STABLE_US + 2 * TICK);
+    TEST_MSG("seen after %d signatures", ticks);
+    TEST_CHECK(settle(&t, &sig, &now, 10) && scene_match(&t, &sig) == t.id);
+}
+
+/* An icon of 12 frames in one cell, looping (a sparkle): masked once it
+ * has looped, as an icon of a few frames; then the screen stays settled. */
+static void test_scene_many_frames(void)
+{
+    SceneTracker t;
+    SceneSig sig;
+    int64_t now = 100000000;
+    uint32_t id = 0;
+    int settled = 0;
+    memset(&t, 0, sizeof(t));
+
+    for (int k = 0; k < 60; k++, now += TICK) {
+        frame_new(960, 544);
+        frame_text(40, 420, 100, 12);
+        frame_glyph(900, 480, 500 + (uint32_t)(k % 12));
+        sig = frame_sig();
+        if (scene_update(&t, &sig, now, NO_INPUT, NO_INPUT) == SCENE_SETTLED) {
+            settled++;
+            id = t.id;
+        }
+    }
+    TEST_CHECK(settled == 1 && t.id == id && t.stable && t.masked >= 1);
+    TEST_MSG("settled %d times", settled);
+}
+
 TEST_LIST = {
     {"pb_roundtrip", test_pb_roundtrip},
     {"buf_interleaved", test_buf_interleaved},
@@ -1031,9 +2098,33 @@ TEST_LIST = {
     {"foreground", test_foreground},
     {"trigger_edges", test_trigger_edges},
     {"trigger_filter", test_trigger_filter},
+    {"scene_grid", test_scene_grid},
+    {"scene_changes", test_scene_changes},
+    {"scene_blinking", test_scene_blinking},
+    {"scene_animated_icon", test_scene_animated_icon},
+    {"scene_mask_expires", test_scene_mask_expires},
+    {"scene_animated_background", test_scene_animated_background},
+    {"scene_revert", test_scene_revert},
+    {"scene_menu_scroll", test_scene_menu_scroll},
+    {"scene_menu_without_input", test_scene_menu_without_input},
+    {"scene_input_and_masks", test_scene_input_and_masks},
+    {"scene_held_scroll", test_scene_held_scroll},
+    {"scene_two_icons", test_scene_two_icons},
+    {"scene_shorter_line", test_scene_shorter_line},
+    {"scene_warm_mask", test_scene_warm_mask},
+    {"scene_fades", test_scene_fades},
+    {"scene_typewriter", test_scene_typewriter},
+    {"scene_spinning_mark", test_scene_spinning_mark},
+    {"scene_quiet_mark", test_scene_quiet_mark},
+    {"scene_quiet_typing", test_scene_quiet_typing},
+    {"scene_torn_mark", test_scene_torn_mark},
+    {"scene_text_next_to_mark", test_scene_text_next_to_mark},
+    {"scene_content_in_icon", test_scene_content_in_icon},
+    {"scene_many_frames", test_scene_many_frames},
     {"config", test_config},
     {"regions", test_regions},
     {"http", test_http},
+    {"net_pool", test_net_pool},
     {"styled", test_styled},
     {"jpegsw", test_jpegsw},
     {"fixtures", test_fixtures},
