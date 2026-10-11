@@ -5,11 +5,12 @@
  *   vjo-cli --text "日本語" --api-key KEY ...
  *   vjo-cli --replay DIR [--dict jpdb|jiten] [--filter lines|none] [--nav]
  *   vjo-cli --print-default-config
- *   ... --anki HOST[:PORT] [--anki-deck DECK] [--anki-add N [--picture FILE.jpg]]
+ *   ... --anki HOST[:PORT] [--anki-deck DECK] [--anki-add N [--picture FILE.jpg] [--game NAME]]
  *
  * --anki checks every entry against AnkiConnect (duplicates in the deck)
  * and --anki-add adds entry N (1-based, as --nav numbers them), with the
- * picture if given and the word's audio (anki_audio_url); the other anki_*
+ * picture if given, the word's audio (anki_audio_url) and the game's name
+ * with the local time as MiscInfo (--game; the time alone without); the other anki_*
  * settings come from --config.
  *
  * The API key may also come from $VJO_JPDB_KEY / $VJO_JITEN_KEY. --replay runs
@@ -18,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
+#include <time.h>
 
 #include "anki.h"
 #include "client.h"
@@ -64,7 +66,7 @@ static int jpeg_size(const uint8_t *p, size_t n, uint32_t *w, uint32_t *h)
 
 /* --anki: duplicate check of every entry, then --anki-add's entry. */
 static int run_anki(VjoArena *a, VjoArena *fa, const VjoPlatform *p, const VjoConfig *cfg, const char *endpoint,
-                    const VjoEntryList *l, int add, const char *picture)
+                    const VjoEntryList *l, int add, const char *picture, const char *game)
 {
     char host[64];
     int port, rc = 0;
@@ -92,14 +94,20 @@ static int run_anki(VjoArena *a, VjoArena *fa, const VjoPlatform *p, const VjoCo
         VjoAnkiMedia m;
         struct timeval tv;
         uint64_t now;
-        char name[40];
+        char name[40], misc[160];
+        time_t t = time(NULL);
+        struct tm lt;
         memset(&m, 0, sizeof(m));
+        localtime_r(&t, &lt);
         gettimeofday(&tv, NULL);
         now = (uint64_t)tv.tv_sec * 1000u + (uint64_t)(tv.tv_usec / 1000);
-        if (vjo_anki_note_from_entry(a, l, add - 1, &n) < 0) {
+        if (vjo_anki_note_from_entry(a, cfg, l, add - 1, &n) < 0) {
             fprintf(stderr, "--anki-add: no entry %d\n", add);
             return 1;
         }
+        VjoAnkiDate when = {lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min};
+        vjo_anki_misc_info(misc, sizeof(misc), game, &when);
+        n.misc = misc;
         if (picture) {
             if (!(m.picture = (const uint8_t *)vjo_read_file(fa, picture, &m.picture_len))) {
                 fprintf(stderr, "cannot read %s\n", picture);
@@ -129,7 +137,7 @@ static void usage(void)
             "               [--filter lines|none] [--record DIR] [--nav] [--stats] [-v]\n"
             "       vjo-cli --text TEXT [options]\n"
             "       vjo-cli --replay DIR [options]\n"
-            "       ... --anki HOST[:PORT] [--anki-deck DECK] [--anki-add N [--picture FILE.jpg]]\n");
+            "       ... --anki HOST[:PORT] [--anki-deck DECK] [--anki-add N [--picture FILE.jpg] [--game NAME]]\n");
     exit(2);
 }
 
@@ -142,7 +150,7 @@ int main(int argc, char **argv)
     VjoPlatform plat;
     VjoOverlayData d;
     const char *image = NULL, *text = NULL, *replay = NULL, *config = NULL, *key = NULL, *dict = NULL;
-    const char *anki = NULL, *anki_deck = NULL, *picture = NULL;
+    const char *anki = NULL, *anki_deck = NULL, *picture = NULL, *game = NULL;
     int nav = 0, stats = 0, anki_add = 0, rc;
 
     memset(mem, 0xA5, sizeof(mem)); /* like a reused arena on the Vita */
@@ -177,6 +185,8 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(s, "--picture") && more)
             picture = argv[++i];
+        else if (!strcmp(s, "--game") && more)
+            game = argv[++i];
         else if (!strcmp(s, "--nav"))
             nav = 1;
         else if (!strcmp(s, "--stats"))
@@ -207,7 +217,7 @@ int main(int argc, char **argv)
         vjo_replay_config(&cfg, replay);
     if (anki_deck)
         snprintf(cfg.anki_deck, sizeof(cfg.anki_deck), "%s", anki_deck);
-    if ((anki_add || picture) && !anki)
+    if ((anki_add || picture || game) && !anki)
         usage();
     if (dict) {
         cfg.dictionary = vjo_dict_find(dict);
@@ -257,7 +267,7 @@ int main(int argc, char **argv)
         for (int i = 0; i < d.list.n_entries; i++)
             printf("%d: %s\n", i + 1, vjo_render_highlight(&a, &d.list, i));
     }
-    if (anki && run_anki(&a, &fa, &plat, &cfg, anki, &d.list, anki_add, picture))
+    if (anki && run_anki(&a, &fa, &plat, &cfg, anki, &d.list, anki_add, picture, game))
         rc = 1;
     if (stats)
         fprintf(stderr, "arena peak: %lu bytes\n", (unsigned long)a.peak);

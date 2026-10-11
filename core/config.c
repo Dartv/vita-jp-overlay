@@ -49,6 +49,11 @@ static const struct {
     [VJO_ANKI_PICTURE] = {"anki_field_picture", "Picture"},
     [VJO_ANKI_FREQUENCY] = {"anki_field_frequency", "FreqSort"},
     [VJO_ANKI_AUDIO] = {"anki_field_audio", "ExpressionAudio"},
+    [VJO_ANKI_SENTENCE_FURIGANA] = {"anki_field_sentence_furigana", "SentenceFurigana"},
+    [VJO_ANKI_PITCH_POSITION] = {"anki_field_pitch_position", "PitchPosition"},
+    [VJO_ANKI_PITCH_CATEGORIES] = {"anki_field_pitch_categories", "PitchCategories"},
+    [VJO_ANKI_FREQUENCY_LIST] = {"anki_field_frequency_list", "Frequency"},
+    [VJO_ANKI_MISC_INFO] = {"anki_field_misc_info", "MiscInfo"},
 };
 
 void vjo_config_defaults(VjoConfig *c)
@@ -129,6 +134,11 @@ const char *vjo_config_default_text(void)
            "anki_field_picture = Picture\n"
            "anki_field_frequency = FreqSort\n"
            "anki_field_audio = ExpressionAudio\n"
+           "anki_field_sentence_furigana = SentenceFurigana\n"
+           "anki_field_pitch_position = PitchPosition\n"
+           "anki_field_pitch_categories = PitchCategories\n"
+           "anki_field_frequency_list = Frequency\n"
+           "anki_field_misc_info = MiscInfo\n"
            "\n"
            "; Word audio: a Yomitan audio source URL with {term} and {reading} (empty = off)\n"
            "anki_audio_url =\n";

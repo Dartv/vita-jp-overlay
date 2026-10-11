@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "json.h"
+#include "pitch.h"
 
 char *vjo_jpdb_build_request(VjoArena *a, const char *text)
 {
@@ -13,7 +14,7 @@ char *vjo_jpdb_build_request(VjoArena *a, const char *text)
     vjo_buf_puts(&b, ",\"token_fields\":[\"vocabulary_index\",\"position\",\"length\",\"furigana\"]"
                      ",\"position_length_encoding\":\"utf16\""
                      ",\"vocabulary_fields\":[\"vid\",\"sid\",\"rid\",\"spelling\",\"reading\","
-                     "\"frequency_rank\",\"meanings\"]}");
+                     "\"frequency_rank\",\"meanings\",\"part_of_speech\",\"pitch_accent\"]}");
     return vjo_buf_cstr(&b);
 }
 
@@ -23,6 +24,18 @@ static long get_long(const VjoJson *j, int arr, int k, long dflt)
     if (vjo_json_int(j, vjo_json_arr_get(j, arr, k), &v) == 0)
         return v;
     return dflt;
+}
+
+/* pitch_accent: ["LHLL", ...] -> downstep positions. */
+static void parse_pitch(const VjoJson *j, int arr, VjoVocab *v)
+{
+    v->n_pitch = 0;
+    if (!vjo_json_is_type(j, arr, JSMN_ARRAY))
+        return;
+    for (int k = 0, t = arr + 1; k < j->t[arr].size && v->n_pitch < VJO_MAX_PITCH; k++, t = vjo_json_skip(j, t))
+        if (vjo_json_is_type(j, t, JSMN_STRING))
+            v->pitch[v->n_pitch++] =
+                vjo_pitch_from_pattern(j->js + j->t[t].start, (size_t)(j->t[t].end - j->t[t].start));
 }
 
 static int parse_vocab(VjoArena *a, const VjoJson *j, int arr, VjoVocab *v)
@@ -58,6 +71,35 @@ static int parse_vocab(VjoArena *a, const VjoJson *j, int arr, VjoVocab *v)
         }
         v->n_meanings = n;
     }
+    parse_pitch(j, vjo_json_arr_get(j, arr, 8), v);
+    return vjo_json_str_array(a, j, vjo_json_arr_get(j, arr, 7), 1, &v->pos, &v->n_pos);
+}
+
+/* A token's furigana, [["降","ふ"],"っていた"], as ruby markup
+ * "降[ふ]っていた" into *out; NULL when it has none. Returns 0, or -1 on
+ * OOM. */
+static int parse_furigana(VjoArena *a, const VjoJson *j, int arr, const char **out)
+{
+    VjoBuf b;
+    *out = NULL;
+    if (!vjo_json_is_type(j, arr, JSMN_ARRAY) || j->t[arr].size == 0)
+        return 0;
+    vjo_buf_init(&b, a);
+    for (int k = 0, i = arr + 1; k < j->t[arr].size; k++, i = vjo_json_skip(j, i)) {
+        int base = vjo_json_arr_get(j, i, 0), reading = vjo_json_arr_get(j, i, 1);
+        if (vjo_json_is_type(j, i, JSMN_STRING)) {
+            vjo_json_append_str(&b, j, i);
+        } else if (vjo_json_is_type(j, i, JSMN_ARRAY) && vjo_json_is_type(j, base, JSMN_STRING) &&
+                   vjo_json_is_type(j, reading, JSMN_STRING)) {
+            vjo_json_append_str(&b, j, base);
+            vjo_buf_putc(&b, '[');
+            vjo_json_append_str(&b, j, reading);
+            vjo_buf_putc(&b, ']');
+        }
+    }
+    if (b.oom)
+        return -1;
+    *out = vjo_buf_cstr(&b);
     return 0;
 }
 
@@ -67,6 +109,7 @@ int vjo_jpdb_parse_response(VjoArena *a, const char *json, size_t len, VjoDictRe
     int voc, tok, n;
 
     memset(out, 0, sizeof(*out));
+    out->source = "jpdb";
     if (vjo_json_parse(a, json, len, &j) < 0)
         return -1;
     voc = vjo_json_obj_get(&j, 0, "vocabulary");
@@ -99,6 +142,8 @@ int vjo_jpdb_parse_response(VjoArena *a, const char *json, size_t len, VjoDictRe
                 t->vocab = (vi >= 0 && vi < n) ? (int)vi : -1;
                 t->pos16 = (int)get_long(&j, i, 1, 0);
                 t->len16 = (int)get_long(&j, i, 2, 0);
+                if (parse_furigana(a, &j, vjo_json_arr_get(&j, i, 3), &t->furigana) < 0)
+                    return -1;
             }
             i = vjo_json_skip(&j, i);
         }

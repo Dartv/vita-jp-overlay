@@ -25,6 +25,20 @@ void vjo_anki_sentence(VjoBuf *b, const char *text, int hl_start, int hl_end);
 void vjo_anki_furigana(VjoBuf *b, const char *spelling, const char *reading);
 /* <ol><li>meaning</li>...</ol>, escaped */
 void vjo_anki_definition(VjoBuf *b, const char *const *meanings, int n);
+/* Downstep positions as Yomitan's PitchPosition: [2], each in spans; two
+ * or more in <ol><li>...</li></ol>. Nothing for n = 0. */
+void vjo_anki_pitch_position(VjoBuf *b, const int *pitch, int n);
+/* Yomitan's pitch categories (vjo_pitch_category), comma-separated
+ * without repeats. */
+void vjo_anki_pitch_categories(VjoBuf *b, const char *reading, const int *pitch, int n, const char *const *pos,
+                               int n_pos);
+
+typedef struct {
+    int year, month, day, hour, minute;
+} VjoAnkiDate;
+/* MiscInfo: "game (2026-10-11 14:32)"; the date alone without a game, the
+ * game alone without a date (when = NULL). Cut on a character boundary. */
+void vjo_anki_misc_info(char *out, size_t cap, const char *game, const VjoAnkiDate *when);
 
 /* One entry, copied out of the result arena (which is reused while the
  * note is being sent). */
@@ -35,9 +49,18 @@ typedef struct {
     int n_meanings;
     const char *sentence; /* VjoEntryList.header */
     int hl_start, hl_end; /* the word in sentence, -1 if none */
+    const char *sentence_furigana; /* the sentence with every word's furigana, NULL = none */
+    int sf_hl_start, sf_hl_end;    /* the word in sentence_furigana, -1 if none */
+    const char *source;            /* the frequency's source ("Jiten"), NULL if unknown */
+    int pitch[VJO_MAX_PITCH], n_pitch;
+    const char **pos; /* part-of-speech codes */
+    int n_pos;
+    const char *misc; /* MiscInfo text, set by the caller; NULL = none */
 } VjoAnkiNote;
 
-int vjo_anki_note_from_entry(VjoArena *a, const VjoEntryList *l, int entry, VjoAnkiNote *out);
+/* sentence_furigana only when cfg has a field for it; without memory for
+ * it, none (the note is still made). */
+int vjo_anki_note_from_entry(VjoArena *a, const VjoConfig *cfg, const VjoEntryList *l, int entry, VjoAnkiNote *out);
 
 /* What × adds besides the entry's text (NULL / 0 = none): the screenshot,
  * a JPEG sent in the request, and the word's audio, a URL Anki downloads.

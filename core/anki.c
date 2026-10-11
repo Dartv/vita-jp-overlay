@@ -4,21 +4,39 @@
 
 #include "base64.h"
 #include "json.h"
+#include "pitch.h"
 #include "port.h"
 #include "utf.h"
 
 /* A computer that is off: give up quickly (the default is ~20 s). */
 #define CONNECT_TIMEOUT_US (3 * 1000 * 1000)
 
-/* AnkiConnect's error messages (its createNote), matched by prefix. */
+/* AnkiConnect's error messages, matched by prefix: the classic add-on's
+ * (its createNote), then its rewrite's (2026: notes.validate, resolve). */
 #define ERR_DUPLICATE "cannot create note because it is a duplicate"
+#define ERR_DUPLICATE_V2 "A matching note exists."
 #define ERR_EMPTY "cannot create note because it is empty"
+#define ERR_EMPTY_V2 "Anki field validation: emptyFirstField"
 #define ERR_NO_MODEL "model was not found: "
+#define ERR_NO_MODEL_V2 "Notetype not found: "
 #define ERR_NO_DECK "deck was not found: "
+#define ERR_NO_DECK_V2 "Deck not found: "
+/* The rewrite's addNote names no reason: canAddNotesWithErrorDetail has it. */
+#define ERR_VALIDATION_V2 "One or more notes failed validation."
 
 static int starts_with(const char *s, const char *prefix)
 {
     return s && strncmp(s, prefix, strlen(prefix)) == 0;
+}
+
+static int is_duplicate(const char *e)
+{
+    return starts_with(e, ERR_DUPLICATE) || starts_with(e, ERR_DUPLICATE_V2);
+}
+
+static int is_no_deck(const char *e)
+{
+    return starts_with(e, ERR_NO_DECK) || starts_with(e, ERR_NO_DECK_V2);
 }
 
 /* ---------------- field values ---------------- */
@@ -64,17 +82,11 @@ void vjo_anki_sentence(VjoBuf *b, const char *text, int hl_start, int hl_end)
     html_text(b, text + hl_end, n - (size_t)hl_end);
 }
 
-static int is_kanji(uint32_t cp)
-{
-    return (cp >= 0x4E00 && cp <= 0x9FFF) || (cp >= 0x3400 && cp <= 0x4DBF) || (cp >= 0xF900 && cp <= 0xFAFF) ||
-           (cp >= 0x20000 && cp <= 0x3134F) || cp == 0x3005 /* 々 */;
-}
-
 static int has_kanji(const char *s)
 {
     size_t n = strlen(s), i = 0;
     while (i < n)
-        if (is_kanji(vjo_utf8_next(s, n, &i)))
+        if (vjo_is_kanji(vjo_utf8_next(s, n, &i)))
             return 1;
     return 0;
 }
@@ -102,16 +114,94 @@ void vjo_anki_definition(VjoBuf *b, const char *const *meanings, int n)
     vjo_buf_puts(b, "</ol>");
 }
 
+void vjo_anki_pitch_position(VjoBuf *b, const int *pitch, int n)
+{
+    if (n <= 0)
+        return;
+    if (n > 1)
+        vjo_buf_puts(b, "<ol>");
+    for (int i = 0; i < n; i++)
+        vjo_buf_printf(b, "%s<span style=\"display:inline;\"><span>[</span><span>%d</span><span>]</span></span>%s",
+                       n > 1 ? "<li>" : "", pitch[i], n > 1 ? "</li>" : "");
+    if (n > 1)
+        vjo_buf_puts(b, "</ol>");
+}
+
+void vjo_anki_pitch_categories(VjoBuf *b, const char *reading, const int *pitch, int n, const char *const *pos,
+                               int n_pos)
+{
+    const char *seen[VJO_MAX_PITCH];
+    int n_seen = 0;
+    for (int i = 0; i < n && n_seen < VJO_MAX_PITCH; i++) {
+        const char *c = vjo_pitch_category(reading, pitch[i], pos, n_pos);
+        int dup = 0;
+        for (int k = 0; k < n_seen && !dup; k++)
+            dup = seen[k] == c;
+        if (dup)
+            continue;
+        if (n_seen)
+            vjo_buf_putc(b, ',');
+        vjo_buf_puts(b, c);
+        seen[n_seen++] = c;
+    }
+}
+
+void vjo_anki_misc_info(char *out, size_t cap, const char *game, const VjoAnkiDate *when)
+{
+    int has_game = game && *game;
+    if (!when)
+        vjo_snprintf(out, cap, "%s", has_game ? game : "");
+    else if (has_game)
+        vjo_snprintf(out, cap, "%s (%04d-%02d-%02d %02d:%02d)", game, when->year, when->month, when->day,
+                     when->hour, when->minute);
+    else
+        vjo_snprintf(out, cap, "%04d-%02d-%02d %02d:%02d", when->year, when->month, when->day, when->hour,
+                     when->minute);
+    vjo_utf8_trim_partial(out);
+}
+
 static char *dup(VjoArena *a, const char *s)
 {
     return vjo_arena_strndup(a, s ? s : "", s ? strlen(s) : 0);
 }
 
-int vjo_anki_note_from_entry(VjoArena *a, const VjoEntryList *l, int entry, VjoAnkiNote *out)
+/* The header with every word's furigana into out->sentence_furigana,
+ * with entry target's range. Returns 0, or -1 on OOM. */
+static int sentence_furigana(VjoArena *a, const VjoEntryList *l, int target, VjoAnkiNote *out)
+{
+    const char *h = l->header;
+    int at = 0;
+    VjoBuf b;
+    vjo_buf_init(&b, a);
+    for (int i = 0; i < l->n_entries; i++) {
+        const VjoEntry *e = &l->entries[i];
+        const char *f;
+        if (e->hl_start < at || e->hl_end <= e->hl_start)
+            continue; /* no token, or overlapping one already written */
+        vjo_buf_append(&b, h + at, (size_t)(e->hl_start - at));
+        if (!(f = vjo_entry_furigana(a, l, i)))
+            return -1;
+        if (b.len == 0 && *f == ' ')
+            f++; /* no space to open the sentence */
+        if (i == target)
+            out->sf_hl_start = (int)b.len;
+        vjo_buf_puts(&b, f);
+        if (i == target)
+            out->sf_hl_end = (int)b.len;
+        at = e->hl_end;
+    }
+    vjo_buf_puts(&b, h + at);
+    if (b.oom)
+        return -1;
+    out->sentence_furigana = vjo_buf_cstr(&b);
+    return 0;
+}
+
+int vjo_anki_note_from_entry(VjoArena *a, const VjoConfig *cfg, const VjoEntryList *l, int entry, VjoAnkiNote *out)
 {
     const VjoEntry *e;
     const VjoVocab *v;
-    char **m;
+    char **m, **p;
     if (!l || entry < 0 || entry >= l->n_entries)
         return -1;
     e = &l->entries[entry];
@@ -123,14 +213,30 @@ int vjo_anki_note_from_entry(VjoArena *a, const VjoEntryList *l, int entry, VjoA
     out->hl_start = e->hl_start;
     out->hl_end = e->hl_end;
     out->n_meanings = 0;
+    out->misc = NULL;
+    out->source = l->source;
+    out->sentence_furigana = NULL;
+    out->sf_hl_start = out->sf_hl_end = -1;
+    if (cfg->anki_field[VJO_ANKI_SENTENCE_FURIGANA][0] && sentence_furigana(a, l, entry, out) < 0) {
+        out->sentence_furigana = NULL; /* added without it */
+        out->sf_hl_start = out->sf_hl_end = -1;
+    }
     m = (char **)vjo_arena_alloc(a, sizeof(char *) * (size_t)(v->n_meanings ? v->n_meanings : 1));
-    if (!out->spelling || !out->reading || !out->sentence || !m)
+    p = (char **)vjo_arena_alloc(a, sizeof(char *) * (size_t)(v->n_pos ? v->n_pos : 1));
+    if (!out->spelling || !out->reading || !out->sentence || !m || !p)
         return -1;
     for (int i = 0; i < v->n_meanings; i++)
         if (!(m[i] = dup(a, v->meanings[i])))
             return -1;
     out->meanings = (const char **)m;
     out->n_meanings = v->n_meanings;
+    for (int i = 0; i < v->n_pos; i++)
+        if (!(p[i] = dup(a, v->pos[i])))
+            return -1;
+    out->pos = (const char **)p;
+    out->n_pos = v->n_pos;
+    out->n_pitch = v->n_pitch;
+    memcpy(out->pitch, v->pitch, sizeof(out->pitch));
     return 0;
 }
 
@@ -171,14 +277,13 @@ static void put_options(VjoBuf *b, const VjoConfig *cfg)
     vjo_buf_puts(b, ",\"checkChildren\":false,\"checkAllModels\":false}}");
 }
 
-char *vjo_anki_can_add_request(VjoArena *a, const VjoConfig *cfg, const VjoEntryList *l, int n)
+/* canAddNotesWithErrorDetail for the n words, each in the word field. */
+static char *can_add_request(VjoArena *a, const VjoConfig *cfg, const char *const *words, int n)
 {
     const char *word = cfg->anki_field[VJO_ANKI_WORD];
     VjoBuf b;
-    if (!*word || !l)
+    if (!*word)
         return NULL;
-    if (n > l->n_entries)
-        n = l->n_entries;
     vjo_buf_init(&b, a);
     vjo_buf_puts(&b, "{\"action\":\"canAddNotesWithErrorDetail\",\"version\":6,\"params\":{\"notes\":[");
     for (int i = 0; i < n; i++) {
@@ -189,13 +294,28 @@ char *vjo_anki_can_add_request(VjoArena *a, const VjoConfig *cfg, const VjoEntry
         vjo_buf_puts(&b, ",\"fields\":{");
         vjo_json_write_string(&b, word);
         vjo_buf_putc(&b, ':');
-        vjo_json_write_string(&b, l->entries[i].vocab->spelling);
+        vjo_json_write_string(&b, words[i]);
         vjo_buf_putc(&b, '}');
         put_options(&b, cfg);
         vjo_buf_putc(&b, '}');
     }
     vjo_buf_puts(&b, "]}}");
     return b.oom ? NULL : vjo_buf_cstr(&b);
+}
+
+char *vjo_anki_can_add_request(VjoArena *a, const VjoConfig *cfg, const VjoEntryList *l, int n)
+{
+    const char **words;
+    if (!cfg->anki_field[VJO_ANKI_WORD][0] || !l)
+        return NULL;
+    if (n > l->n_entries)
+        n = l->n_entries;
+    words = (const char **)vjo_arena_alloc(a, sizeof(char *) * (size_t)(n > 0 ? n : 1));
+    if (!words)
+        return NULL;
+    for (int i = 0; i < n; i++)
+        words[i] = l->entries[i].vocab->spelling;
+    return can_add_request(a, cfg, words, n);
 }
 
 /* "tags":[...] from tags separated by spaces. */
@@ -239,6 +359,25 @@ static char *value(VjoArena *a, int field, const VjoAnkiNote *n)
         if (n->rank != VJO_NO_RANK)
             vjo_buf_printf(&b, "%d", n->rank);
         break;
+    case VJO_ANKI_SENTENCE_FURIGANA:
+        if (n->sentence_furigana)
+            vjo_anki_sentence(&b, n->sentence_furigana, n->sf_hl_start, n->sf_hl_end);
+        break;
+    case VJO_ANKI_PITCH_POSITION: vjo_anki_pitch_position(&b, n->pitch, n->n_pitch); break;
+    case VJO_ANKI_PITCH_CATEGORIES:
+        vjo_anki_pitch_categories(&b, n->reading, n->pitch, n->n_pitch, n->pos, n->n_pos);
+        break;
+    case VJO_ANKI_FREQUENCY_LIST:
+        if (n->rank != VJO_NO_RANK && n->source) {
+            vjo_buf_puts(&b, "<ul style=\"text-align: left;\"><li>");
+            html_escape(&b, n->source, strlen(n->source));
+            vjo_buf_printf(&b, ": %d</li></ul>", n->rank);
+        }
+        break;
+    case VJO_ANKI_MISC_INFO:
+        if (n->misc)
+            html_escape(&b, n->misc, strlen(n->misc));
+        break;
     default: break;
     }
     return vjo_buf_cstr(&b);
@@ -257,7 +396,7 @@ static void put_media(VjoBuf *b, const char *kind, const char *name, const char 
 int vjo_anki_add_request(VjoArena *a, const VjoConfig *cfg, const VjoAnkiNote *n, const VjoAnkiMedia *m,
                          VjoAnkiBody *out)
 {
-    char *v[VJO_ANKI_FIELD_COUNT];
+    const char *v[VJO_ANKI_FIELD_COUNT];
     const char *pic = cfg->anki_field[VJO_ANKI_PICTURE], *audio = cfg->anki_field[VJO_ANKI_AUDIO];
     int first = 1;
     VjoBuf b;
@@ -270,6 +409,12 @@ int vjo_anki_add_request(VjoArena *a, const VjoConfig *cfg, const VjoAnkiNote *n
         if (v[f] && !*v[f])
             v[f] = NULL; /* nothing to add (no rank, no meanings) */
     }
+    /* A media field is sent empty: the rewritten AnkiConnect (2026) puts the
+     * <img>/[sound:] only into fields the request names. */
+    if (m->audio_url && m->audio_name && *audio)
+        v[VJO_ANKI_AUDIO] = "";
+    if (m->picture_len && m->picture_name && *pic)
+        v[VJO_ANKI_PICTURE] = "";
     vjo_buf_init(&b, a);
     vjo_buf_puts(&b, "{\"action\":\"addNote\",\"version\":6,\"params\":{\"note\":{");
     put_target(&b, cfg);
@@ -447,14 +592,16 @@ static int parse_reply(VjoArena *a, const char *json, size_t len, VjoJson *j, in
     if (!vjo_json_is_null(j, e)) {
         if (!(*error = vjo_json_str(a, j, e)))
             return VJO_E_OOM;
-        return starts_with(*error, ERR_DUPLICATE) ? VJO_E_ANKI_DUPLICATE : VJO_E_ANKI;
+        return is_duplicate(*error) ? VJO_E_ANKI_DUPLICATE : VJO_E_ANKI;
     }
     *result = r;
     return VJO_OK;
 }
 
-/* canAddNotesWithErrorDetail: [{"canAdd": bool, "error"?: string}, ...] */
-static int parse_can_add(VjoArena *a, const char *json, size_t len, uint8_t *marks, int n, const char **error)
+/* canAddNotesWithErrorDetail: [{"canAdd": bool, "error"?: string}, ...];
+ * marks[k] = a duplicate, reasons[k] (if not NULL) = the error, NULL if none. */
+static int parse_can_add(VjoArena *a, const char *json, size_t len, uint8_t *marks, const char **reasons, int n,
+                         const char **error)
 {
     VjoJson j;
     int r, rc = parse_reply(a, json, len, &j, &r, error), i, k;
@@ -466,8 +613,10 @@ static int parse_can_add(VjoArena *a, const char *json, size_t len, uint8_t *mar
         int can_add, e = vjo_json_obj_get(&j, i, "error");
         if (vjo_json_bool(&j, vjo_json_obj_get(&j, i, "canAdd"), &can_add) < 0)
             return VJO_E_PARSE;
-        marks[k] = !can_add && vjo_json_is_type(&j, e, JSMN_STRING) &&
-                   starts_with(vjo_json_str(a, &j, e), ERR_DUPLICATE);
+        const char *why = !can_add && vjo_json_is_type(&j, e, JSMN_STRING) ? vjo_json_str(a, &j, e) : NULL;
+        marks[k] = is_duplicate(why);
+        if (reasons)
+            reasons[k] = why;
     }
     return VJO_OK;
 }
@@ -562,8 +711,34 @@ int vjo_anki_check(VjoArena *a, const VjoPlatform *p, const char *host, int port
     text_body(&b, request);
     if (anki_post(a, p, host, port, &b, &resp, err))
         return err->rc;
-    err->rc = parse_can_add(a, resp.body, resp.body_len, marks, n, &error);
+    err->rc = parse_can_add(a, resp.body, resp.body_len, marks, NULL, n, &error);
     err->detail = error;
+    return err->rc;
+}
+
+/* The rewritten AnkiConnect refused the note without a reason: asks for
+ * it, so a duplicate is VJO_E_ANKI_DUPLICATE (its ✓) and anything else
+ * says what failed. Keeps err as it is when the question fails too. */
+static int why_refused(VjoArena *a, const VjoPlatform *p, const char *host, int port, const VjoConfig *cfg,
+                       const VjoAnkiNote *n, VjoErr *err)
+{
+    VjoAnkiBody b;
+    VjoHttpResponse resp;
+    VjoErr e;
+    uint8_t dup = 0;
+    const char *reason = NULL, *error, *words[1] = {n->spelling};
+    char *request = can_add_request(a, cfg, words, 1);
+    if (!request)
+        return err->rc;
+    memset(&e, 0, sizeof(e));
+    text_body(&b, request);
+    if (anki_post(a, p, host, port, &b, &resp, &e) ||
+        parse_can_add(a, resp.body, resp.body_len, &dup, &reason, 1, &error))
+        return err->rc;
+    if (dup)
+        return err->rc = VJO_E_ANKI_DUPLICATE;
+    if (reason)
+        err->detail = reason;
     return err->rc;
 }
 
@@ -577,7 +752,9 @@ int vjo_anki_add(VjoArena *a, const VjoPlatform *p, const char *host, int port, 
     memset(err, 0, sizeof(*err));
     if (vjo_anki_add_request(a, cfg, n, m, &note) < 0)
         return err->rc = VJO_E_OOM;
-    if (call(a, p, host, port, &note, &j, &r, err) != VJO_E_ANKI || !starts_with(err->detail, ERR_NO_DECK))
+    if (call(a, p, host, port, &note, &j, &r, err) == VJO_E_ANKI && starts_with(err->detail, ERR_VALIDATION_V2))
+        return why_refused(a, p, host, port, cfg, n, err);
+    if (err->rc != VJO_E_ANKI || !is_no_deck(err->detail))
         return err->rc;
     /* The first note of a new deck. */
     if (!(create = create_deck_request(a, cfg->anki_deck)))
@@ -672,11 +849,18 @@ const char *vjo_anki_err_text(VjoArena *a, const VjoErr *err)
         vjo_buf_printf(&b, "Anki refused the request (HTTP %d)", err->http_status);
         break;
     case VJO_E_ANKI:
-        if (starts_with(err->detail, ERR_NO_MODEL)) {
+        if (starts_with(err->detail, ERR_NO_MODEL) || starts_with(err->detail, ERR_NO_MODEL_V2)) {
+            /* "model was not found: Lapis", "Notetype not found: {'name': 'Lapis'}" */
+            const char *name = err->detail + strlen(starts_with(err->detail, ERR_NO_MODEL) ? ERR_NO_MODEL : ERR_NO_MODEL_V2);
+            size_t len = strlen(name);
+            if (starts_with(name, "{'name': '") && len >= 12 && !strcmp(name + len - 2, "'}")) {
+                name += 10;
+                len -= 12;
+            }
             vjo_buf_puts(&b, "Note type \"");
-            vjo_buf_puts(&b, err->detail + strlen(ERR_NO_MODEL));
+            vjo_buf_append(&b, name, len);
             vjo_buf_puts(&b, "\" not found in Anki (anki_note_type)");
-        } else if (starts_with(err->detail, ERR_EMPTY)) {
+        } else if (starts_with(err->detail, ERR_EMPTY) || starts_with(err->detail, ERR_EMPTY_V2)) {
             vjo_buf_puts(&b, "Anki: the note type's first field is empty (check anki_field_word)");
         } else {
             vjo_buf_puts(&b, "Anki: ");

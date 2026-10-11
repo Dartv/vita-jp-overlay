@@ -254,3 +254,28 @@ int vjo_json_write_stringn(VjoBuf *b, const char *s, size_t n)
     vjo_buf_putc(b, '"');
     return b->oom ? -1 : 0;
 }
+
+int vjo_json_str_array(VjoArena *a, const VjoJson *j, int arr, int dedup, const char ***out, int *n_out)
+{
+    int n;
+    *out = NULL;
+    *n_out = 0;
+    if (!vjo_json_is_type(j, arr, JSMN_ARRAY) || (n = j->t[arr].size) == 0)
+        return 0;
+    *out = (const char **)vjo_arena_alloc(a, sizeof(char *) * (size_t)n);
+    if (!*out)
+        return -1;
+    for (int k = 0, i = arr + 1; k < n; k++, i = vjo_json_skip(j, i)) {
+        const char *s;
+        int dup = 0;
+        if (!vjo_json_is_type(j, i, JSMN_STRING))
+            continue;
+        if (!(s = vjo_json_str(a, j, i)))
+            return -1;
+        for (int d = 0; dedup && d < *n_out && !dup; d++)
+            dup = !strcmp((*out)[d], s);
+        if (!dup)
+            (*out)[(*n_out)++] = s;
+    }
+    return 0;
+}

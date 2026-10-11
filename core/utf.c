@@ -86,6 +86,26 @@ int vjo_ieq_prefix(const char *s, const char *prefix)
     return 1;
 }
 
+int vjo_starts_withn(const char *s, size_t n, const char *prefix)
+{
+    size_t k = strlen(prefix);
+    return n >= k && !memcmp(s, prefix, k);
+}
+
+void vjo_utf8_trim_partial(char *s)
+{
+    size_t n = strlen(s), start = n, need;
+    unsigned char lead;
+    while (start > 0 && ((unsigned char)s[start - 1] & 0xC0) == 0x80)
+        start--;
+    if (start == 0)
+        return;
+    lead = (unsigned char)s[start - 1];
+    need = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
+    if (n - (start - 1) < need)
+        s[start - 1] = '\0';
+}
+
 int vjo_ieq(const char *a, const char *b)
 {
     return vjo_ieq_prefix(a, b) && strlen(a) == strlen(b);

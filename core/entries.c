@@ -3,6 +3,7 @@
 #include <limits.h>
 #include <string.h>
 
+#include "furigana.h"
 #include "port.h"
 #include "utf.h"
 
@@ -56,6 +57,7 @@ static void add_entry(VjoEntryList *out, const VjoVocab *v, const char *text, co
     e->text = text;
     e->pos16 = -1;
     e->hl_start = e->hl_end = -1;
+    e->furigana = tok ? tok->furigana : NULL;
     if (tok && tok->pos16 >= 0) {
         /* Positions come from the server: saturate the end (no signed
          * overflow); u16_to_byte maps positions past the text to its end. */
@@ -93,6 +95,7 @@ int vjo_entries_build(VjoArena *a, const char *filtered, const VjoDictResult *r,
     out->header = header;
     out->entries = NULL;
     out->n_entries = 0;
+    out->source = r->source;
 
     if (!n)
         return 0;
@@ -148,4 +151,13 @@ char *vjo_entries_body(VjoArena *a, const VjoEntryList *l)
         vjo_buf_puts(&b, l->entries[i].text);
     }
     return vjo_buf_cstr(&b);
+}
+
+char *vjo_entry_furigana(VjoArena *a, const VjoEntryList *l, int i)
+{
+    const VjoEntry *e = &l->entries[i];
+    const char *ruby = e->furigana ? e->furigana : e->vocab->ruby;
+    if (e->hl_start < 0 || e->hl_end <= e->hl_start)
+        return NULL;
+    return vjo_furigana_align(a, l->header + e->hl_start, (size_t)(e->hl_end - e->hl_start), ruby);
 }
