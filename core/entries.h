@@ -6,6 +6,7 @@
 
 #include "arena.h"
 #include "dict.h"
+#include "furigana.h"
 
 typedef struct {
     const VjoVocab *vocab;
@@ -28,10 +29,14 @@ typedef struct {
  * the dictionary's order). */
 int vjo_entries_build(VjoArena *a, const char *filtered, const VjoDictResult *r, VjoEntryList *out);
 
-/* Entry i's text in the header with furigana (" 降[ふ]っていた"), from the
- * token's ruby, else its word's dictionary form; the plain text when
- * neither has one. NULL when it has no text in the header, or on OOM. */
-char *vjo_entry_furigana(VjoArena *a, const VjoEntryList *l, int i);
+/* The readings of the header's kanji (byte ranges in the header, in text
+ * order) from the entries the header's furigana takes: those with text in
+ * the header, less one overlapping the one before. Up to cap; returns the
+ * number written. */
+int vjo_entries_rubies(const VjoEntryList *l, VjoRuby *out, int cap);
+
+/* Is entry i one of those? */
+int vjo_entry_in_text(const VjoEntryList *l, int i);
 
 /* Entry format: spelling + " (reading)" if different + " rank",
  * then "\n" + each meaning. */

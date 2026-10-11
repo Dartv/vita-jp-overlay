@@ -50,6 +50,21 @@ void vjo_styled_puts(VjoStyled *s, const char *utf8, uint32_t rgb, int px);
 /* UTF-16 index of byte offset `off` in UTF-8 text. */
 uint32_t vjo_utf16_index(const char *utf8, size_t off);
 
+/* Furigana over a text shown in one Text (the subtitles strip): UTF-16
+ * ranges of it, readings of up to VJO_STRIP_READING_MAX - 1 bytes. */
+#define VJO_STRIP_RUBY_MAX 64
+#define VJO_STRIP_READING_MAX 32 /* bytes with the NUL: 10 kana */
+typedef struct {
+    uint16_t start, end; /* UTF-16 units of the text: the kanji */
+    char reading[VJO_STRIP_READING_MAX];
+} VjoStripRuby;
+
+/* The readings of text (UTF-8, as vjo_styled_add counts it) from words, a
+ * lookup of it: its header starts with text (which may be cut). Readings
+ * past the text and longer ones are left out. Up to cap; returns the number
+ * written, 0 on OOM. */
+int vjo_strip_rubies(VjoArena *a, const char *text, const VjoEntryList *words, VjoStripRuby *out, int cap);
+
 /* Header: the OCR text in one span (highlights are applied separately). */
 void vjo_styled_header(VjoStyled *s, const VjoEntryList *l, int ja_px);
 

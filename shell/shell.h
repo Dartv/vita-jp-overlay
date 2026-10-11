@@ -8,6 +8,7 @@
 
 #include "../core/client.h"
 #include "../core/config.h"
+#include "../core/styled.h"
 #include "../include/vjo_api.h"
 
 #ifdef __cplusplus
@@ -51,12 +52,16 @@ typedef struct {
     unsigned anki_marks_seq;  /* list_seq the marks are for */
     uint8_t anki_mark[VJO_MAX_ENTRIES]; /* 1 = already in Anki */
     /* subtitles: a strip at the top while the overlay is closed; changes
-     * bump strip_version */
+     * bump strip_version, and those of the text or its readings their seq */
     int strip_on;             /* subtitles are on (stored atomically) */
     unsigned strip_version;
+    unsigned strip_text_seq, strip_ruby_seq;
     char strip_text[VJO_STRIP_MAX]; /* "" = no strip drawn */
     int strip_kind;           /* VJO_STRIP_* */
     int strip_busy;           /* a recognition is running */
+    int strip_ruby_room;      /* a sentence keeps room for readings (they can come: an API key is set) */
+    VjoStripRuby strip_ruby[VJO_STRIP_RUBY_MAX]; /* the sentence's readings, once looked up */
+    int strip_n_ruby;
 } VjoView;
 
 extern VjoView g_view;
@@ -75,6 +80,16 @@ void vjo_post_command(int cmd, const VjoRect *rect);
 /* worker.c */
 int vjo_worker_start(void);
 void vjo_worker_stop(void);
+
+/* strip_view.c: the strip's view model (control thread) */
+/* Subtitles on/off and the settings the strip shows with (cfg loaded). */
+void vjo_strip_configure(int on, const VjoConfig *cfg);
+/* The strip's text, of kind VJO_STRIP_* (cut at a character boundary to
+ * fit), and its busy mark. A new text has no readings. */
+void vjo_strip_show(const char *text, int kind, int busy);
+void vjo_strip_set_busy(int busy);
+/* The readings of the strip's sentence from words, a lookup of it. */
+void vjo_strip_show_readings(VjoArena *scratch, const VjoEntryList *words);
 
 /* capture.c */
 int vjo_capture_init(void);

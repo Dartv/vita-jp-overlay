@@ -77,6 +77,43 @@ uint32_t vjo_utf16_index(const char *utf8, size_t off)
     return u;
 }
 
+int vjo_strip_rubies(VjoArena *a, const char *text, const VjoEntryList *words, VjoStripRuby *out, int cap)
+{
+    size_t len = strlen(text), i = 0, mark = vjo_arena_mark(a);
+    VjoRuby *r = (VjoRuby *)vjo_arena_alloc(a, sizeof(VjoRuby) * (size_t)cap);
+    uint32_t u = 0;
+    int nr, n = 0;
+    if (!r || !words->header || strncmp(words->header, text, len)) {
+        vjo_arena_release(a, mark);
+        return 0;
+    }
+    nr = vjo_entries_rubies(words, r, cap);
+    /* One pass over the text: the readings are in text order. */
+    for (int k = 0; k < nr && r[k].end <= len; k++) {
+        if (r[k].reading_len >= VJO_STRIP_READING_MAX || r[k].end - r[k].start > 0xFFFF)
+            continue;
+        while (i < r[k].start) {
+            uint32_t cp = vjo_utf8_next(text, len, &i);
+            if (cp != '\r')
+                u += (uint32_t)vjo_utf16_units(cp);
+        }
+        out[n].start = (uint16_t)u;
+        while (i < r[k].end) {
+            uint32_t cp = vjo_utf8_next(text, len, &i);
+            if (cp != '\r')
+                u += (uint32_t)vjo_utf16_units(cp);
+        }
+        if (u > 0xFFFF)
+            break;
+        out[n].end = (uint16_t)u;
+        memcpy(out[n].reading, r[k].reading, r[k].reading_len);
+        out[n].reading[r[k].reading_len] = '\0';
+        n++;
+    }
+    vjo_arena_release(a, mark);
+    return n;
+}
+
 void vjo_styled_header(VjoStyled *s, const VjoEntryList *l, int ja_px)
 {
     if (l && l->header)
