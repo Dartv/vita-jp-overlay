@@ -166,31 +166,30 @@ static char *dup(VjoArena *a, const char *s)
 }
 
 /* The header with every word's furigana into out->sentence_furigana,
- * with entry target's range. Returns 0, or -1 on OOM. */
+ * with entry target's range (if the furigana takes it). Returns 0, or -1 on
+ * OOM. */
 static int sentence_furigana(VjoArena *a, const VjoEntryList *l, int target, VjoAnkiNote *out)
 {
     const char *h = l->header;
-    int at = 0;
+    size_t len = strlen(h);
+    int cap = (int)(len / 2) + 1; /* a kanji is 3 or 4 bytes */
+    VjoRuby *r = (VjoRuby *)vjo_arena_alloc(a, sizeof(VjoRuby) * (size_t)cap);
+    int nr;
     VjoBuf b;
+    if (!r)
+        return -1;
+    nr = vjo_entries_rubies(l, r, cap);
     vjo_buf_init(&b, a);
-    for (int i = 0; i < l->n_entries; i++) {
-        const VjoEntry *e = &l->entries[i];
-        const char *f;
-        if (e->hl_start < at || e->hl_end <= e->hl_start)
-            continue; /* no token, or overlapping one already written */
-        vjo_buf_append(&b, h + at, (size_t)(e->hl_start - at));
-        if (!(f = vjo_entry_furigana(a, l, i)))
-            return -1;
-        if (b.len == 0 && *f == ' ')
-            f++; /* no space to open the sentence */
-        if (i == target)
-            out->sf_hl_start = (int)b.len;
-        vjo_buf_puts(&b, f);
-        if (i == target)
-            out->sf_hl_end = (int)b.len;
-        at = e->hl_end;
+    if (vjo_entry_in_text(l, target)) {
+        size_t hs = (size_t)l->entries[target].hl_start, he = (size_t)l->entries[target].hl_end;
+        vjo_furigana_render(&b, h, 0, hs, r, nr, 0);
+        out->sf_hl_start = (int)b.len;
+        vjo_furigana_render(&b, h, hs, he, r, nr, 0);
+        out->sf_hl_end = (int)b.len;
+        vjo_furigana_render(&b, h, he, len, r, nr, 0);
+    } else {
+        vjo_furigana_render(&b, h, 0, len, r, nr, 0);
     }
-    vjo_buf_puts(&b, h + at);
     if (b.oom)
         return -1;
     out->sentence_furigana = vjo_buf_cstr(&b);

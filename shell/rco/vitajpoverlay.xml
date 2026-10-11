@@ -95,7 +95,15 @@
     </page>
   </pagetable>
 
-  <templatetable />
+  <templatetable>
+    <!-- a furigana reading over the strip's sentence (strip.cpp makes them
+         in vjo_strip_box, sized to their text; size and color from code) -->
+    <template fast_open="1" id="vjo_strip_ruby_tpl">
+      <text style="vjo_style_ruby" id="vjo_strip_ruby">
+        <layout_hint adjust="2, 2" />
+      </text>
+    </template>
+  </templatetable>
 
   <styletable>
     <style_plane color="0, 0, 0, 0.9" planeobj="vjo_panel_obj" id="vjo_style_panel">
@@ -123,6 +131,9 @@
     <style_text textobj="vjo_plain_obj" id="vjo_style_plain">
       <textobj font_size="20" color="1, 1, 1, 1" align_x="0" align_y="0" text_align="0"
                word_wrap="1" kinsoku="1" id="vjo_plain_obj" />
+    </style_text>
+    <style_text textobj="vjo_ruby_obj" id="vjo_style_ruby">
+      <textobj align_x="0" align_y="0" text_align="0" word_wrap="0" id="vjo_ruby_obj" />
     </style_text>
     <style_rich_text bg_obj="vjo_text_bg" id="vjo_style_text">
       <planeobj color="0, 0, 0, 0" id="vjo_text_bg" />

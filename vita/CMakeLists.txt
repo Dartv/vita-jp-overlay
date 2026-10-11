@@ -18,7 +18,7 @@ set(CMAKE_C_EXTENSIONS ON)
 include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
-set(VJO_VERSION "0.7")
+set(VJO_VERSION "0.8")
 
 # ---------------- kernel ----------------
 add_executable(VitaJPOverlay_Kernel
@@ -76,6 +76,7 @@ add_executable(VitaJPOverlay_Shell
   ${ROOT}/shell/main.cpp
   ${ROOT}/shell/overlay.cpp
   ${ROOT}/shell/strip.cpp
+  ${ROOT}/shell/strip_view.c
   ${ROOT}/shell/worker.c
   ${ROOT}/shell/capture.c
   ${ROOT}/shell/game.c

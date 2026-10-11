@@ -54,10 +54,10 @@ Running it again later keeps your settings. `--uninstall` removes the plugin lin
 In a game:
 
 
-| Input      | Action                                                                                                        |
-| ---------- | ------------------------------------------------------------------------------------------------------------- |
-| L + R      | Open or close the overlay (`toggle_button`).                                                                  |
-| Select + R | Subtitles on or off (`subtitle_button`): the recognized text in a strip at the top, updated as the game runs. |
+| Input      | Action                                                                                                                                                                      |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| L + R      | Open or close the overlay (`toggle_button`).                                                                                                                                |
+| Select + R | Subtitles on or off (`subtitle_button`): the recognized text in a strip at the top, updated as the game runs, with furigana once its words are looked up (with an API key). |
 
 
 In the overlay:
@@ -140,7 +140,7 @@ All settings live in `ux0:data/VitaJPOverlay/config.ini`. The area to read (□ 
 - The chosen area of the screen is sent to Google Lens for text recognition. In `auto` mode,
 and while subtitles are on, that happens every time the area changes while a game is running.
 - The recognized text is sent to jiten.moe (`api.jiten.moe`) or jpdb.io, along with your API
-key.
+key: when the overlay shows it, in `auto` mode, and while subtitles are on (for their furigana).
 - With Anki set up, the cards (including the screenshot) go to Anki on your computer over your
 local network. `anki_host = auto` looks for it on port 8765 of the other devices on your
 network.

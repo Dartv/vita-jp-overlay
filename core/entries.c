@@ -153,11 +153,46 @@ char *vjo_entries_body(VjoArena *a, const VjoEntryList *l)
     return vjo_buf_cstr(&b);
 }
 
-char *vjo_entry_furigana(VjoArena *a, const VjoEntryList *l, int i)
+/* The entries the header's furigana takes, in text order: the next after
+ * entry i (-1: the first), -1 after the last. */
+static int next_in_text(const VjoEntryList *l, int i)
 {
-    const VjoEntry *e = &l->entries[i];
-    const char *ruby = e->furigana ? e->furigana : e->vocab->ruby;
-    if (e->hl_start < 0 || e->hl_end <= e->hl_start)
-        return NULL;
-    return vjo_furigana_align(a, l->header + e->hl_start, (size_t)(e->hl_end - e->hl_start), ruby);
+    int at = i < 0 ? 0 : l->entries[i].hl_end;
+    for (int j = i + 1; j < l->n_entries; j++) {
+        const VjoEntry *e = &l->entries[j];
+        if (e->hl_start >= at && e->hl_end > e->hl_start)
+            return j;
+    }
+    return -1;
+}
+
+int vjo_entry_in_text(const VjoEntryList *l, int i)
+{
+    int j = next_in_text(l, -1);
+    while (j >= 0 && j < i)
+        j = next_in_text(l, j);
+    return i >= 0 && j == i;
+}
+
+/* An entry's ruby markup: its token's (jpdb), else its word's dictionary
+ * form's (jiten). */
+static const char *entry_ruby(const VjoEntry *e)
+{
+    return e->furigana ? e->furigana : e->vocab->ruby;
+}
+
+int vjo_entries_rubies(const VjoEntryList *l, VjoRuby *out, int cap)
+{
+    int n = 0;
+    for (int i = next_in_text(l, -1); i >= 0 && n < cap; i = next_in_text(l, i)) {
+        const VjoEntry *e = &l->entries[i];
+        int k = n;
+        n += vjo_furigana_rubies(l->header + e->hl_start, (size_t)(e->hl_end - e->hl_start), entry_ruby(e), out + n,
+                                 cap - n);
+        for (; k < n; k++) {
+            out[k].start += (size_t)e->hl_start;
+            out[k].end += (size_t)e->hl_start;
+        }
+    }
+    return n;
 }
