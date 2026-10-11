@@ -253,7 +253,7 @@ static void test_anki_requests(void)
                        "{\"action\":\"addNote\",\"version\":6,\"params\":{\"note\":{" TARGET ",\"fields\":{"
                        "\"Expression\":\"猫\",\"ExpressionReading\":\"ねこ\",\"ExpressionFurigana\":\"猫[ねこ]\","
                        "\"MainDefinition\":\"<ol><li>cat &quot;neko&quot;</li><li>a\\\\b &lt;&amp;&gt;\\nc</li></ol>\","
-                       "\"Sentence\":\"<b>猫</b>が<br>好き\",\"FreqSort\":\"1500\","
+                       "\"Sentence\":\"<b>猫</b>が<br>好き\",\"Picture\":\"\",\"FreqSort\":\"1500\","
                        "\"SentenceFurigana\":\"<b>猫[ねこ]</b>が<br> 好[す]き\","
                        "\"PitchPosition\":\"<span style=\\\"display:inline;\\\"><span>[</span><span>1</span>"
                        "<span>]</span></span>\",\"PitchCategories\":\"atamadaka\","
@@ -269,14 +269,15 @@ static void test_anki_requests(void)
     m.audio_url = "https://example.com/a \"b\".opus";
     m.audio_name = "vitajp_1.opus";
     TEST_ASSERT(vjo_anki_add_request(&A, &cfg, &n, &m, &b) == 0);
-    TEST_CHECK(strstr(b.prefix, "(2026-10-11 09:05)\"},") && !strstr(b.prefix, "ExpressionAudio\":\""));
+    /* media fields are named, empty: the rewritten AnkiConnect fills only named ones */
+    TEST_CHECK(strstr(b.prefix, "\"Picture\":\"\",\"FreqSort\"") && strstr(b.prefix, "\"ExpressionAudio\":\"\","));
     TEST_CHECK(strstr(b.prefix, OPTS ",\"audio\":[{\"filename\":\"vitajp_1.opus\",\"fields\":[\"ExpressionAudio\"],"
                                 "\"url\":\"https://example.com/a \\\"b\\\".opus\"}],"
                                 "\"picture\":[{\"filename\":\"vitajp_1.jpg\"") != NULL);
     TEST_MSG("%s", b.prefix);
     cfg.anki_field[VJO_ANKI_AUDIO][0] = '\0'; /* no audio field: no audio */
     TEST_ASSERT(vjo_anki_add_request(&A, &cfg, &n, &m, &b) == 0);
-    TEST_CHECK(!strstr(b.prefix, "\"audio\""));
+    TEST_CHECK(!strstr(b.prefix, "\"audio\"") && !strstr(b.prefix, "ExpressionAudio"));
 
     /* blank fields are skipped; no picture field: no picture; no rank: no frequency */
     cfg.anki_field[VJO_ANKI_READING][0] = '\0';

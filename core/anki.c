@@ -396,7 +396,7 @@ static void put_media(VjoBuf *b, const char *kind, const char *name, const char 
 int vjo_anki_add_request(VjoArena *a, const VjoConfig *cfg, const VjoAnkiNote *n, const VjoAnkiMedia *m,
                          VjoAnkiBody *out)
 {
-    char *v[VJO_ANKI_FIELD_COUNT];
+    const char *v[VJO_ANKI_FIELD_COUNT];
     const char *pic = cfg->anki_field[VJO_ANKI_PICTURE], *audio = cfg->anki_field[VJO_ANKI_AUDIO];
     int first = 1;
     VjoBuf b;
@@ -409,6 +409,12 @@ int vjo_anki_add_request(VjoArena *a, const VjoConfig *cfg, const VjoAnkiNote *n
         if (v[f] && !*v[f])
             v[f] = NULL; /* nothing to add (no rank, no meanings) */
     }
+    /* A media field is sent empty: the rewritten AnkiConnect (2026) puts the
+     * <img>/[sound:] only into fields the request names. */
+    if (m->audio_url && m->audio_name && *audio)
+        v[VJO_ANKI_AUDIO] = "";
+    if (m->picture_len && m->picture_name && *pic)
+        v[VJO_ANKI_PICTURE] = "";
     vjo_buf_init(&b, a);
     vjo_buf_puts(&b, "{\"action\":\"addNote\",\"version\":6,\"params\":{\"note\":{");
     put_target(&b, cfg);
