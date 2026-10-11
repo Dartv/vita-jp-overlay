@@ -414,6 +414,12 @@ static void test_anki_check(void)
     TEST_CHECK(vjo_anki_check(&A, &p, "h", 8765, req, marks, 3, &err) == VJO_OK);
     TEST_CHECK(marks[0] == 1 && marks[1] == 0 && marks[2] == 0 && marks[3] == 7);
     TEST_CHECK(strstr(f.sent[0], "\"Expression\":\"が\"") != NULL);
+    /* the rewritten AnkiConnect (2026) words a duplicate differently */
+    fake_net(&f, &p, 1,
+             ok("{\"result\": [{\"canAdd\": false, \"error\": \"A matching note exists.\"}, {\"canAdd\": true}, "
+                "{\"canAdd\": false, \"error\": \"Deck not found: {'name': 'Duplicates'}\"}], \"error\": null}"));
+    TEST_CHECK(vjo_anki_check(&A, &p, "h", 8765, req, marks, 3, &err) == VJO_OK);
+    TEST_CHECK(marks[0] == 1 && marks[1] == 0 && marks[2] == 0);
     /* malformed: the wrong count, a non-boolean canAdd, an old AnkiConnect */
     fake_net(&f, &p, 3, ok("{\"result\": [{\"canAdd\": true}], \"error\": null}"),
              ok("{\"result\": [{\"canAdd\": \"false\"}, {\"canAdd\": true}, {\"canAdd\": true}], \"error\": null}"),
@@ -491,7 +497,31 @@ static void test_anki_add(void)
     REFUSED("cannot create note because it is empty", VJO_E_ANKI,
             "Anki: the note type's first field is empty (check anki_field_word)");
     REFUSED("collection is not available", VJO_E_ANKI, "Anki: collection is not available");
+    REFUSED("Notetype not found: {'name': 'Lapis'}", VJO_E_ANKI,
+            "Note type \"Lapis\" not found in Anki (anki_note_type)");
 #undef REFUSED
+
+    /* The rewritten AnkiConnect (2026): a new deck is "Deck not found" */
+    fake_net(&f, &p, 3, ok("{\"result\": null, \"error\": \"Deck not found: {'name': 'Default'}\"}"),
+             ok("{\"result\": 1, \"error\": null}"), ok("{\"result\": 2, \"error\": null}"));
+    TEST_CHECK(vjo_anki_add(&A, &p, "h", 8765, &cfg, &n, &none, &err) == VJO_OK);
+    TEST_CHECK(f.next == 3 && strstr(f.sent[1], "\"action\":\"createDeck\""));
+    /* ... and a refused note names no reason: asked with canAddNotesWithErrorDetail */
+#define VALIDATION "{\"result\": null, \"error\": \"One or more notes failed validation.\"}"
+    fake_net(&f, &p, 2, ok(VALIDATION),
+             ok("{\"result\": [{\"canAdd\": false, \"error\": \"A matching note exists.\"}], \"error\": null}"));
+    TEST_CHECK(vjo_anki_add(&A, &p, "h", 8765, &cfg, &n, &none, &err) == VJO_E_ANKI_DUPLICATE);
+    TEST_CHECK(f.next == 2 && strstr(f.sent[1], "\"action\":\"canAddNotesWithErrorDetail\""));
+    TEST_CHECK(!strcmp(vjo_anki_err_text(&A, &err), "Already in Anki"));
+    fake_net(&f, &p, 2, ok(VALIDATION),
+             ok("{\"result\": [{\"canAdd\": false, \"error\": \"Anki field validation: emptyFirstField\"}], "
+                "\"error\": null}"));
+    TEST_CHECK(vjo_anki_add(&A, &p, "h", 8765, &cfg, &n, &none, &err) == VJO_E_ANKI);
+    TEST_CHECK(!strcmp(vjo_anki_err_text(&A, &err), "Anki: the note type's first field is empty (check anki_field_word)"));
+    fake_net(&f, &p, 1, ok(VALIDATION)); /* the question fails too: the refusal as it is */
+    TEST_CHECK(vjo_anki_add(&A, &p, "h", 8765, &cfg, &n, &none, &err) == VJO_E_ANKI);
+    TEST_CHECK(!strcmp(vjo_anki_err_text(&A, &err), "Anki: One or more notes failed validation."));
+#undef VALIDATION
 
     fake_net(&f, &p, 1, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
     TEST_CHECK(vjo_anki_add(&A, &p, "h", 8765, &cfg, &n, &none, &err) == VJO_E_STATUS);

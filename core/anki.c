@@ -11,15 +11,32 @@
 /* A computer that is off: give up quickly (the default is ~20 s). */
 #define CONNECT_TIMEOUT_US (3 * 1000 * 1000)
 
-/* AnkiConnect's error messages (its createNote), matched by prefix. */
+/* AnkiConnect's error messages, matched by prefix: the classic add-on's
+ * (its createNote), then its rewrite's (2026: notes.validate, resolve). */
 #define ERR_DUPLICATE "cannot create note because it is a duplicate"
+#define ERR_DUPLICATE_V2 "A matching note exists."
 #define ERR_EMPTY "cannot create note because it is empty"
+#define ERR_EMPTY_V2 "Anki field validation: emptyFirstField"
 #define ERR_NO_MODEL "model was not found: "
+#define ERR_NO_MODEL_V2 "Notetype not found: "
 #define ERR_NO_DECK "deck was not found: "
+#define ERR_NO_DECK_V2 "Deck not found: "
+/* The rewrite's addNote names no reason: canAddNotesWithErrorDetail has it. */
+#define ERR_VALIDATION_V2 "One or more notes failed validation."
 
 static int starts_with(const char *s, const char *prefix)
 {
     return s && strncmp(s, prefix, strlen(prefix)) == 0;
+}
+
+static int is_duplicate(const char *e)
+{
+    return starts_with(e, ERR_DUPLICATE) || starts_with(e, ERR_DUPLICATE_V2);
+}
+
+static int is_no_deck(const char *e)
+{
+    return starts_with(e, ERR_NO_DECK) || starts_with(e, ERR_NO_DECK_V2);
 }
 
 /* ---------------- field values ---------------- */
@@ -260,14 +277,13 @@ static void put_options(VjoBuf *b, const VjoConfig *cfg)
     vjo_buf_puts(b, ",\"checkChildren\":false,\"checkAllModels\":false}}");
 }
 
-char *vjo_anki_can_add_request(VjoArena *a, const VjoConfig *cfg, const VjoEntryList *l, int n)
+/* canAddNotesWithErrorDetail for the n words, each in the word field. */
+static char *can_add_request(VjoArena *a, const VjoConfig *cfg, const char *const *words, int n)
 {
     const char *word = cfg->anki_field[VJO_ANKI_WORD];
     VjoBuf b;
-    if (!*word || !l)
+    if (!*word)
         return NULL;
-    if (n > l->n_entries)
-        n = l->n_entries;
     vjo_buf_init(&b, a);
     vjo_buf_puts(&b, "{\"action\":\"canAddNotesWithErrorDetail\",\"version\":6,\"params\":{\"notes\":[");
     for (int i = 0; i < n; i++) {
@@ -278,13 +294,28 @@ char *vjo_anki_can_add_request(VjoArena *a, const VjoConfig *cfg, const VjoEntry
         vjo_buf_puts(&b, ",\"fields\":{");
         vjo_json_write_string(&b, word);
         vjo_buf_putc(&b, ':');
-        vjo_json_write_string(&b, l->entries[i].vocab->spelling);
+        vjo_json_write_string(&b, words[i]);
         vjo_buf_putc(&b, '}');
         put_options(&b, cfg);
         vjo_buf_putc(&b, '}');
     }
     vjo_buf_puts(&b, "]}}");
     return b.oom ? NULL : vjo_buf_cstr(&b);
+}
+
+char *vjo_anki_can_add_request(VjoArena *a, const VjoConfig *cfg, const VjoEntryList *l, int n)
+{
+    const char **words;
+    if (!cfg->anki_field[VJO_ANKI_WORD][0] || !l)
+        return NULL;
+    if (n > l->n_entries)
+        n = l->n_entries;
+    words = (const char **)vjo_arena_alloc(a, sizeof(char *) * (size_t)(n > 0 ? n : 1));
+    if (!words)
+        return NULL;
+    for (int i = 0; i < n; i++)
+        words[i] = l->entries[i].vocab->spelling;
+    return can_add_request(a, cfg, words, n);
 }
 
 /* "tags":[...] from tags separated by spaces. */
@@ -555,14 +586,16 @@ static int parse_reply(VjoArena *a, const char *json, size_t len, VjoJson *j, in
     if (!vjo_json_is_null(j, e)) {
         if (!(*error = vjo_json_str(a, j, e)))
             return VJO_E_OOM;
-        return starts_with(*error, ERR_DUPLICATE) ? VJO_E_ANKI_DUPLICATE : VJO_E_ANKI;
+        return is_duplicate(*error) ? VJO_E_ANKI_DUPLICATE : VJO_E_ANKI;
     }
     *result = r;
     return VJO_OK;
 }
 
-/* canAddNotesWithErrorDetail: [{"canAdd": bool, "error"?: string}, ...] */
-static int parse_can_add(VjoArena *a, const char *json, size_t len, uint8_t *marks, int n, const char **error)
+/* canAddNotesWithErrorDetail: [{"canAdd": bool, "error"?: string}, ...];
+ * marks[k] = a duplicate, reasons[k] (if not NULL) = the error, NULL if none. */
+static int parse_can_add(VjoArena *a, const char *json, size_t len, uint8_t *marks, const char **reasons, int n,
+                         const char **error)
 {
     VjoJson j;
     int r, rc = parse_reply(a, json, len, &j, &r, error), i, k;
@@ -574,8 +607,10 @@ static int parse_can_add(VjoArena *a, const char *json, size_t len, uint8_t *mar
         int can_add, e = vjo_json_obj_get(&j, i, "error");
         if (vjo_json_bool(&j, vjo_json_obj_get(&j, i, "canAdd"), &can_add) < 0)
             return VJO_E_PARSE;
-        marks[k] = !can_add && vjo_json_is_type(&j, e, JSMN_STRING) &&
-                   starts_with(vjo_json_str(a, &j, e), ERR_DUPLICATE);
+        const char *why = !can_add && vjo_json_is_type(&j, e, JSMN_STRING) ? vjo_json_str(a, &j, e) : NULL;
+        marks[k] = is_duplicate(why);
+        if (reasons)
+            reasons[k] = why;
     }
     return VJO_OK;
 }
@@ -670,8 +705,34 @@ int vjo_anki_check(VjoArena *a, const VjoPlatform *p, const char *host, int port
     text_body(&b, request);
     if (anki_post(a, p, host, port, &b, &resp, err))
         return err->rc;
-    err->rc = parse_can_add(a, resp.body, resp.body_len, marks, n, &error);
+    err->rc = parse_can_add(a, resp.body, resp.body_len, marks, NULL, n, &error);
     err->detail = error;
+    return err->rc;
+}
+
+/* The rewritten AnkiConnect refused the note without a reason: asks for
+ * it, so a duplicate is VJO_E_ANKI_DUPLICATE (its ✓) and anything else
+ * says what failed. Keeps err as it is when the question fails too. */
+static int why_refused(VjoArena *a, const VjoPlatform *p, const char *host, int port, const VjoConfig *cfg,
+                       const VjoAnkiNote *n, VjoErr *err)
+{
+    VjoAnkiBody b;
+    VjoHttpResponse resp;
+    VjoErr e;
+    uint8_t dup = 0;
+    const char *reason = NULL, *error, *words[1] = {n->spelling};
+    char *request = can_add_request(a, cfg, words, 1);
+    if (!request)
+        return err->rc;
+    memset(&e, 0, sizeof(e));
+    text_body(&b, request);
+    if (anki_post(a, p, host, port, &b, &resp, &e) ||
+        parse_can_add(a, resp.body, resp.body_len, &dup, &reason, 1, &error))
+        return err->rc;
+    if (dup)
+        return err->rc = VJO_E_ANKI_DUPLICATE;
+    if (reason)
+        err->detail = reason;
     return err->rc;
 }
 
@@ -685,7 +746,9 @@ int vjo_anki_add(VjoArena *a, const VjoPlatform *p, const char *host, int port, 
     memset(err, 0, sizeof(*err));
     if (vjo_anki_add_request(a, cfg, n, m, &note) < 0)
         return err->rc = VJO_E_OOM;
-    if (call(a, p, host, port, &note, &j, &r, err) != VJO_E_ANKI || !starts_with(err->detail, ERR_NO_DECK))
+    if (call(a, p, host, port, &note, &j, &r, err) == VJO_E_ANKI && starts_with(err->detail, ERR_VALIDATION_V2))
+        return why_refused(a, p, host, port, cfg, n, err);
+    if (err->rc != VJO_E_ANKI || !is_no_deck(err->detail))
         return err->rc;
     /* The first note of a new deck. */
     if (!(create = create_deck_request(a, cfg->anki_deck)))
@@ -780,11 +843,18 @@ const char *vjo_anki_err_text(VjoArena *a, const VjoErr *err)
         vjo_buf_printf(&b, "Anki refused the request (HTTP %d)", err->http_status);
         break;
     case VJO_E_ANKI:
-        if (starts_with(err->detail, ERR_NO_MODEL)) {
+        if (starts_with(err->detail, ERR_NO_MODEL) || starts_with(err->detail, ERR_NO_MODEL_V2)) {
+            /* "model was not found: Lapis", "Notetype not found: {'name': 'Lapis'}" */
+            const char *name = err->detail + strlen(starts_with(err->detail, ERR_NO_MODEL) ? ERR_NO_MODEL : ERR_NO_MODEL_V2);
+            size_t len = strlen(name);
+            if (starts_with(name, "{'name': '") && len >= 12 && !strcmp(name + len - 2, "'}")) {
+                name += 10;
+                len -= 12;
+            }
             vjo_buf_puts(&b, "Note type \"");
-            vjo_buf_puts(&b, err->detail + strlen(ERR_NO_MODEL));
+            vjo_buf_append(&b, name, len);
             vjo_buf_puts(&b, "\" not found in Anki (anki_note_type)");
-        } else if (starts_with(err->detail, ERR_EMPTY)) {
+        } else if (starts_with(err->detail, ERR_EMPTY) || starts_with(err->detail, ERR_EMPTY_V2)) {
             vjo_buf_puts(&b, "Anki: the note type's first field is empty (check anki_field_word)");
         } else {
             vjo_buf_puts(&b, "Anki: ");
