@@ -12,6 +12,7 @@ typedef struct {
     int pos16;              /* token position in the lookup text, -1 if none */
     int hl_start, hl_end;   /* byte range in VjoEntryList.header, -1 if none */
     const char *text;       /* "spelling (reading) rank\nmeaning..." (shared by a word's entries) */
+    const char *furigana;   /* the token's VjoToken.furigana, NULL if none */
 } VjoEntry;
 
 typedef struct {

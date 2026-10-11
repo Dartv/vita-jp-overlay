@@ -25,6 +25,17 @@ void vjo_anki_sentence(VjoBuf *b, const char *text, int hl_start, int hl_end);
 void vjo_anki_furigana(VjoBuf *b, const char *spelling, const char *reading);
 /* <ol><li>meaning</li>...</ol>, escaped */
 void vjo_anki_definition(VjoBuf *b, const char *const *meanings, int n);
+/* Downstep positions as Yomitan's PitchPosition: [2], each in spans; two
+ * or more in <ol><li>...</li></ol>. Nothing for n = 0. */
+void vjo_anki_pitch_position(VjoBuf *b, const int *pitch, int n);
+/* Yomitan's pitch categories, comma-separated without repeats: 0 heiban;
+ * a verb or i-adjective (part-of-speech codes) otherwise kifuku; 1
+ * atamadaka; the reading's mora count odaka; else nakadaka. */
+void vjo_anki_pitch_categories(VjoBuf *b, const char *reading, const int *pitch, int n, const char *const *pos,
+                               int n_pos);
+/* MiscInfo: "game (2026-10-11 14:32)", or the date alone without a game. */
+void vjo_anki_misc_info(char *out, size_t cap, const char *game, int year, int month, int day, int hour,
+                        int minute);
 
 /* One entry, copied out of the result arena (which is reused while the
  * note is being sent). */
@@ -35,6 +46,11 @@ typedef struct {
     int n_meanings;
     const char *sentence; /* VjoEntryList.header */
     int hl_start, hl_end; /* the word in sentence, -1 if none */
+    const char *sentence_furigana; /* HTML: every word with furigana, this one in <b> */
+    int pitch[VJO_MAX_PITCH], n_pitch;
+    const char **pos; /* part-of-speech codes */
+    int n_pos;
+    const char *misc; /* MiscInfo text, set by the caller; NULL = none */
 } VjoAnkiNote;
 
 int vjo_anki_note_from_entry(VjoArena *a, const VjoEntryList *l, int entry, VjoAnkiNote *out);

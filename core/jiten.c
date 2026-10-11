@@ -15,13 +15,6 @@ char *vjo_jiten_build_request(VjoArena *a, const char *text)
     return vjo_buf_cstr(&b);
 }
 
-static int is_kanji(uint32_t cp)
-{
-    return (cp >= 0x3400 && cp <= 0x4DBF) || (cp >= 0x4E00 && cp <= 0x9FFF) ||
-           (cp >= 0xF900 && cp <= 0xFAFF) || (cp >= 0x20000 && cp <= 0x3FFFF) ||
-           cp == 0x3005 /* 々 */ || cp == 0x3006 /* 〆 */ || cp == 0x30F5 || cp == 0x30F6 /* ヵヶ */;
-}
-
 char *vjo_jiten_ruby_to_kana(VjoArena *a, const char *ruby)
 {
     size_t len = strlen(ruby), i = 0, o = 0;
@@ -51,7 +44,7 @@ char *vjo_jiten_ruby_to_kana(VjoArena *a, const char *ruby)
             in_kanji = 0;
             continue;
         }
-        if (is_kanji(cp)) {
+        if (vjo_is_kanji(cp)) {
             if (!in_kanji)
                 kanji_start = o;
             in_kanji = 1;
@@ -107,6 +100,44 @@ static int parse_meanings(VjoArena *a, const VjoJson *j, int chunks, VjoVocab *v
     return 0;
 }
 
+/* pitchAccents: [0, 3], downstep positions. */
+static void parse_pitch(const VjoJson *j, int arr, VjoVocab *v)
+{
+    v->n_pitch = 0;
+    if (!vjo_json_is_type(j, arr, JSMN_ARRAY))
+        return;
+    for (int k = 0; k < j->t[arr].size && v->n_pitch < VJO_MAX_PITCH; k++) {
+        long p;
+        if (vjo_json_int(j, vjo_json_arr_get(j, arr, k), &p) == 0 && p >= 0 && p < 64)
+            v->pitch[v->n_pitch++] = (int)p;
+    }
+}
+
+/* meaningsPartOfSpeech: short codes ("v5r", "adj-i"), one per sense and
+ * repeated; kept once each. */
+static int parse_pos(VjoArena *a, const VjoJson *j, int arr, VjoVocab *v)
+{
+    int n;
+    v->pos = NULL;
+    v->n_pos = 0;
+    if (!vjo_json_is_type(j, arr, JSMN_ARRAY) || (n = j->t[arr].size) == 0)
+        return 0;
+    v->pos = (const char **)vjo_arena_alloc(a, sizeof(char *) * (size_t)n);
+    if (!v->pos)
+        return -1;
+    for (int k = 0; k < n; k++) {
+        const char *s = vjo_json_str(a, j, vjo_json_arr_get(j, arr, k));
+        int dup = 0;
+        if (!s)
+            return -1;
+        for (int d = 0; d < v->n_pos && !dup; d++)
+            dup = !strcmp(v->pos[d], s);
+        if (!dup)
+            v->pos[v->n_pos++] = s;
+    }
+    return 0;
+}
+
 static int parse_vocab(VjoArena *a, const VjoJson *j, int obj, VjoVocab *v)
 {
     long rank;
@@ -120,8 +151,12 @@ static int parse_vocab(VjoArena *a, const VjoJson *j, int obj, VjoVocab *v)
     v->reading = vjo_jiten_ruby_to_kana(a, ruby);
     if (!v->reading)
         return -1;
+    v->ruby = ruby;
     rank = obj_long(j, obj, "frequencyRank", 0);
     v->rank = rank > 0 ? (int)rank : VJO_NO_RANK;
+    parse_pitch(j, vjo_json_obj_get(j, obj, "pitchAccents"), v);
+    if (parse_pos(a, j, vjo_json_obj_get(j, obj, "meaningsPartOfSpeech"), v) < 0)
+        return -1;
     return parse_meanings(a, j, vjo_json_obj_get(j, obj, "meaningsChunks"), v);
 }
 

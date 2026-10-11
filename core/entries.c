@@ -56,6 +56,7 @@ static void add_entry(VjoEntryList *out, const VjoVocab *v, const char *text, co
     e->text = text;
     e->pos16 = -1;
     e->hl_start = e->hl_end = -1;
+    e->furigana = tok ? tok->furigana : NULL;
     if (tok && tok->pos16 >= 0) {
         /* Positions come from the server: saturate the end (no signed
          * overflow); u16_to_byte maps positions past the text to its end. */

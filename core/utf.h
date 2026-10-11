@@ -21,6 +21,14 @@ int vjo_ieq_prefix(const char *s, const char *prefix);
 char *vjo_java_trim(char *s);
 
 /* Japanese characters: [぀-ゟ゠-ヿ一-龯] */
+/* Kanji, as furigana bases: CJK ideographs, 々〆 and the counters ヵヶ. */
+static inline int vjo_is_kanji(uint32_t cp)
+{
+    return (cp >= 0x3400 && cp <= 0x4DBF) || (cp >= 0x4E00 && cp <= 0x9FFF) || (cp >= 0xF900 && cp <= 0xFAFF) ||
+           (cp >= 0x20000 && cp <= 0x3FFFF) || cp == 0x3005 /* 々 */ || cp == 0x3006 /* 〆 */ ||
+           cp == 0x30F5 || cp == 0x30F6 /* ヵヶ */;
+}
+
 static inline int vjo_is_japanese_char(uint32_t cp)
 {
     return (cp >= 0x3040 && cp <= 0x309F) || (cp >= 0x30A0 && cp <= 0x30FF) ||

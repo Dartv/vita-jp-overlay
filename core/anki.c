@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "base64.h"
+#include "furigana.h"
 #include "json.h"
 #include "port.h"
 #include "utf.h"
@@ -64,17 +65,11 @@ void vjo_anki_sentence(VjoBuf *b, const char *text, int hl_start, int hl_end)
     html_text(b, text + hl_end, n - (size_t)hl_end);
 }
 
-static int is_kanji(uint32_t cp)
-{
-    return (cp >= 0x4E00 && cp <= 0x9FFF) || (cp >= 0x3400 && cp <= 0x4DBF) || (cp >= 0xF900 && cp <= 0xFAFF) ||
-           (cp >= 0x20000 && cp <= 0x3134F) || cp == 0x3005 /* 々 */;
-}
-
 static int has_kanji(const char *s)
 {
     size_t n = strlen(s), i = 0;
     while (i < n)
-        if (is_kanji(vjo_utf8_next(s, n, &i)))
+        if (vjo_is_kanji(vjo_utf8_next(s, n, &i)))
             return 1;
     return 0;
 }
@@ -102,16 +97,139 @@ void vjo_anki_definition(VjoBuf *b, const char *const *meanings, int n)
     vjo_buf_puts(b, "</ol>");
 }
 
+void vjo_anki_pitch_position(VjoBuf *b, const int *pitch, int n)
+{
+    if (n <= 0)
+        return;
+    if (n > 1)
+        vjo_buf_puts(b, "<ol>");
+    for (int i = 0; i < n; i++)
+        vjo_buf_printf(b, "%s<span style=\"display:inline;\"><span>[</span><span>%d</span><span>]</span></span>%s",
+                       n > 1 ? "<li>" : "", pitch[i], n > 1 ? "</li>" : "");
+    if (n > 1)
+        vjo_buf_puts(b, "</ol>");
+}
+
+/* Morae of a kana reading: small ゃゅょぁぃぅぇぉゎ (and katakana) join
+ * the kana before them. */
+static int morae(const char *reading)
+{
+    static const uint32_t small[] = {0x3083, 0x3085, 0x3087, 0x3041, 0x3043, 0x3045, 0x3047, 0x3049, 0x308E,
+                                     0x30E3, 0x30E5, 0x30E7, 0x30A1, 0x30A3, 0x30A5, 0x30A7, 0x30A9, 0x30EE};
+    size_t n = strlen(reading), i = 0;
+    int m = 0;
+    while (i < n) {
+        uint32_t cp = vjo_utf8_next(reading, n, &i);
+        int is_small = 0;
+        for (unsigned k = 0; k < sizeof(small) / sizeof(small[0]) && !is_small; k++)
+            is_small = cp == small[k];
+        m += !is_small;
+    }
+    return m;
+}
+
+/* Yomitan's isNonNounVerbOrAdjective: a verb or i-adjective, but not a
+ * noun that takes する. */
+static int verb_or_adjective(const char *const *pos, int n)
+{
+    int verb = 0, suru = 0, noun = 0;
+    for (int i = 0; i < n; i++) {
+        const char *p = pos[i];
+        if (!strncmp(p, "v1", 2) || !strncmp(p, "v5", 2) || !strncmp(p, "vk", 2) || !strncmp(p, "vz", 2) ||
+            !strcmp(p, "adj-i"))
+            verb = 1;
+        else if (!strncmp(p, "vs", 2))
+            verb = suru = 1;
+        else if (!strcmp(p, "n"))
+            noun = 1;
+    }
+    return verb && !(suru && noun);
+}
+
+void vjo_anki_pitch_categories(VjoBuf *b, const char *reading, const int *pitch, int n, const char *const *pos,
+                               int n_pos)
+{
+    const char *seen[VJO_MAX_PITCH];
+    int n_seen = 0, m = morae(reading ? reading : ""), verb = verb_or_adjective(pos, n_pos);
+    for (int i = 0; i < n && n_seen < VJO_MAX_PITCH; i++) {
+        const char *c;
+        int dup = 0;
+        if (pitch[i] == 0)
+            c = "heiban";
+        else if (verb)
+            c = "kifuku";
+        else if (pitch[i] == 1)
+            c = "atamadaka";
+        else if (pitch[i] == m)
+            c = "odaka";
+        else
+            c = "nakadaka";
+        for (int k = 0; k < n_seen && !dup; k++)
+            dup = seen[k] == c;
+        if (dup)
+            continue;
+        if (n_seen)
+            vjo_buf_putc(b, ',');
+        vjo_buf_puts(b, c);
+        seen[n_seen++] = c;
+    }
+}
+
+void vjo_anki_misc_info(char *out, size_t cap, const char *game, int year, int month, int day, int hour,
+                        int minute)
+{
+    if (game && *game)
+        vjo_snprintf(out, cap, "%s (%04d-%02d-%02d %02d:%02d)", game, year, month, day, hour, minute);
+    else
+        vjo_snprintf(out, cap, "%04d-%02d-%02d %02d:%02d", year, month, day, hour, minute);
+}
+
 static char *dup(VjoArena *a, const char *s)
 {
     return vjo_arena_strndup(a, s ? s : "", s ? strlen(s) : 0);
+}
+
+/* The header with every token's furigana (jpdb's, or aligned from the
+ * jiten ruby), entry `target` in <b>, as HTML. */
+static char *sentence_furigana(VjoArena *a, const VjoEntryList *l, int target)
+{
+    const char *h = l->header;
+    int at = 0;
+    VjoBuf b;
+    vjo_buf_init(&b, a);
+    for (int i = 0; i < l->n_entries; i++) {
+        const VjoEntry *e = &l->entries[i];
+        size_t n;
+        const char *f;
+        if (e->hl_start < at || e->hl_end <= e->hl_start)
+            continue; /* no token, or overlapping one already written */
+        html_text(&b, h + at, (size_t)(e->hl_start - at));
+        n = (size_t)(e->hl_end - e->hl_start);
+        f = e->furigana;
+        if (!f && e->vocab->ruby && !(f = vjo_furigana_align(a, h + e->hl_start, n, e->vocab->ruby)))
+            return NULL;
+        if (i == target)
+            vjo_buf_puts(&b, "<b>");
+        if (f) {
+            if (b.len == 0 && *f == ' ')
+                f++; /* no space to open the sentence */
+            html_text(&b, f, strlen(f));
+        } else {
+            html_text(&b, h + e->hl_start, n);
+        }
+        if (i == target)
+            vjo_buf_puts(&b, "</b>");
+        at = e->hl_end;
+    }
+    html_text(&b, h + at, strlen(h + at));
+    return b.oom ? NULL : vjo_buf_cstr(&b);
 }
 
 int vjo_anki_note_from_entry(VjoArena *a, const VjoEntryList *l, int entry, VjoAnkiNote *out)
 {
     const VjoEntry *e;
     const VjoVocab *v;
-    char **m;
+    char **m, **p;
     if (!l || entry < 0 || entry >= l->n_entries)
         return -1;
     e = &l->entries[entry];
@@ -123,14 +241,24 @@ int vjo_anki_note_from_entry(VjoArena *a, const VjoEntryList *l, int entry, VjoA
     out->hl_start = e->hl_start;
     out->hl_end = e->hl_end;
     out->n_meanings = 0;
+    out->misc = NULL;
+    out->sentence_furigana = sentence_furigana(a, l, entry);
     m = (char **)vjo_arena_alloc(a, sizeof(char *) * (size_t)(v->n_meanings ? v->n_meanings : 1));
-    if (!out->spelling || !out->reading || !out->sentence || !m)
+    p = (char **)vjo_arena_alloc(a, sizeof(char *) * (size_t)(v->n_pos ? v->n_pos : 1));
+    if (!out->spelling || !out->reading || !out->sentence || !out->sentence_furigana || !m || !p)
         return -1;
     for (int i = 0; i < v->n_meanings; i++)
         if (!(m[i] = dup(a, v->meanings[i])))
             return -1;
     out->meanings = (const char **)m;
     out->n_meanings = v->n_meanings;
+    for (int i = 0; i < v->n_pos; i++)
+        if (!(p[i] = dup(a, v->pos[i])))
+            return -1;
+    out->pos = (const char **)p;
+    out->n_pos = v->n_pos;
+    out->n_pitch = v->n_pitch;
+    memcpy(out->pitch, v->pitch, sizeof(out->pitch));
     return 0;
 }
 
@@ -225,7 +353,7 @@ static int is_media(int field)
 }
 
 /* The HTML value of a VJO_ANKI_* field that is not media. */
-static char *value(VjoArena *a, int field, const VjoAnkiNote *n)
+static char *value(VjoArena *a, const VjoConfig *cfg, int field, const VjoAnkiNote *n)
 {
     VjoBuf b;
     vjo_buf_init(&b, a);
@@ -238,6 +366,20 @@ static char *value(VjoArena *a, int field, const VjoAnkiNote *n)
     case VJO_ANKI_FREQUENCY:
         if (n->rank != VJO_NO_RANK)
             vjo_buf_printf(&b, "%d", n->rank);
+        break;
+    case VJO_ANKI_SENTENCE_FURIGANA: vjo_buf_puts(&b, n->sentence_furigana ? n->sentence_furigana : ""); break;
+    case VJO_ANKI_PITCH_POSITION: vjo_anki_pitch_position(&b, n->pitch, n->n_pitch); break;
+    case VJO_ANKI_PITCH_CATEGORIES:
+        vjo_anki_pitch_categories(&b, n->reading, n->pitch, n->n_pitch, n->pos, n->n_pos);
+        break;
+    case VJO_ANKI_FREQUENCY_LIST:
+        if (n->rank != VJO_NO_RANK)
+            vjo_buf_printf(&b, "<ul style=\"text-align: left;\"><li>%s: %d</li></ul>",
+                           cfg->dictionary == VJO_DICT_JPDB ? "jpdb" : "Jiten", n->rank);
+        break;
+    case VJO_ANKI_MISC_INFO:
+        if (n->misc)
+            html_escape(&b, n->misc, strlen(n->misc));
         break;
     default: break;
     }
@@ -265,7 +407,7 @@ int vjo_anki_add_request(VjoArena *a, const VjoConfig *cfg, const VjoAnkiNote *n
     /* Values first, so the request below grows in place. */
     for (int f = 0; f < VJO_ANKI_FIELD_COUNT; f++) {
         v[f] = NULL;
-        if (!is_media(f) && cfg->anki_field[f][0] && !(v[f] = value(a, f, n)))
+        if (!is_media(f) && cfg->anki_field[f][0] && !(v[f] = value(a, cfg, f, n)))
             return -1;
         if (v[f] && !*v[f])
             v[f] = NULL; /* nothing to add (no rank, no meanings) */

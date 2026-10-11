@@ -102,7 +102,7 @@ All settings live in `ux0:data/VitaJPOverlay/config.ini`. The area to read (□ 
 
 ## Anki
 
-× adds selected word to Anki, along with the reading, furigana, definitions, the sentence, a screenshot of the game, the frequency rank and (optionally) the word's audio. Words already in your deck show a green √.
+× adds selected word to Anki, along with the reading, furigana, definitions, the sentence (also with furigana), a screenshot of the game, the pitch accent, the frequency rank, the game's name and date, and (optionally) the word's audio. Words already in your deck show a green √.
 
 1. In Anki, install [AnkiConnect](https://ankiweb.net/shared/info/2055492159).
 2. Tools → Add-ons → AnkiConnect → Config: set `"webBindAddress": "0.0.0.0"`, then restart Anki.
@@ -111,21 +111,26 @@ All settings live in `ux0:data/VitaJPOverlay/config.ini`. The area to read (□ 
 5. Optional, word audio: set `anki_audio_url` to a Yomitan custom audio source URL, the same one you'd paste into Yomitan, with `{term}` and `{reading}` in it. To host your own, see [yomitan-ultimate-audio](https://github.com/friedrich-de/yomitan-ultimate-audio?tab=readme-ov-file). The Vita looks up the word there and Anki downloads the audio.
 
 
-| Key                     | Default              | What it does                                                                         |
-| ----------------------- | -------------------- | ------------------------------------------------------------------------------------ |
-| `anki_host`             | empty                | The computer running Anki: empty = off, `auto` = search the network, or `IP[:port]`. |
-| `anki_deck`             | `Default`            | Deck for new cards.                                                                  |
-| `anki_note_type`        | `Lapis`              | Note type for new cards.                                                             |
-| `anki_tags`             | `vita-jp-overlay`    | Tags for new cards, separated by spaces.                                             |
-| `anki_field_word`       | `Expression`         | Field for the word.                                                                  |
-| `anki_field_reading`    | `ExpressionReading`  | Field for the reading in kana.                                                       |
-| `anki_field_furigana`   | `ExpressionFurigana` | Field for the word with its reading, `言葉[ことば]`.                                      |
-| `anki_field_definition` | `MainDefinition`     | Field for the definitions, as a numbered list.                                       |
-| `anki_field_sentence`   | `Sentence`           | Field for the recognized text, with the word in bold.                                |
-| `anki_field_picture`    | `Picture`            | Field for the screenshot of the game.                                                |
-| `anki_field_frequency`  | `FreqSort`           | Field for the frequency rank.                                                        |
-| `anki_field_audio`      | `ExpressionAudio`    | Field for the word's audio.                                                          |
-| `anki_audio_url`        | empty                | Yomitan custom audio source URL with `{term}` and `{reading}`: empty = no audio.     |
+| Key                            | Default              | What it does                                                                             |
+| ------------------------------ | -------------------- | ---------------------------------------------------------------------------------------- |
+| `anki_host`                    | empty                | The computer running Anki: empty = off, `auto` = search the network, or `IP[:port]`.     |
+| `anki_deck`                    | `Default`            | Deck for new cards.                                                                      |
+| `anki_note_type`               | `Lapis`              | Note type for new cards.                                                                 |
+| `anki_tags`                    | `vita-jp-overlay`    | Tags for new cards, separated by spaces.                                                 |
+| `anki_field_word`              | `Expression`         | Field for the word.                                                                      |
+| `anki_field_reading`           | `ExpressionReading`  | Field for the reading in kana.                                                           |
+| `anki_field_furigana`          | `ExpressionFurigana` | Field for the word with its reading, `言葉[ことば]`.                                     |
+| `anki_field_definition`        | `MainDefinition`     | Field for the definitions, as a numbered list.                                           |
+| `anki_field_sentence`          | `Sentence`           | Field for the recognized text, with the word in bold.                                    |
+| `anki_field_picture`           | `Picture`            | Field for the screenshot of the game.                                                    |
+| `anki_field_frequency`         | `FreqSort`           | Field for the frequency rank.                                                            |
+| `anki_field_audio`             | `ExpressionAudio`    | Field for the word's audio.                                                              |
+| `anki_field_sentence_furigana` | `SentenceFurigana`   | Field for the sentence with furigana, `昨日[きのう]は`, the word in bold.                |
+| `anki_field_pitch_position`    | `PitchPosition`      | Field for the pitch accent's downstep, `[2]`.                                            |
+| `anki_field_pitch_categories`  | `PitchCategories`    | Field for the pitch accent's type: `heiban`, `atamadaka`, `nakadaka`, `odaka`, `kifuku`. |
+| `anki_field_frequency_list`    | `Frequency`          | Field for the frequency rank with the dictionary's name, as a list.                      |
+| `anki_field_misc_info`         | `MiscInfo`           | Field for the game's name and the date. PSP games show `PSP`.                            |
+| `anki_audio_url`               | empty                | Yomitan custom audio source URL with `{term}` and `{reading}`: empty = no audio.         |
 
 
 

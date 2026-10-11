@@ -107,14 +107,51 @@ static void test_anki_fields(void)
     }
 }
 
+static void test_anki_pitch(void)
+{
+    static const char *const noun[] = {"n"}, *const verb[] = {"v5m", "vt"}, *const suru[] = {"n", "vs"},
+                             *const adj[] = {"adj-i"};
+    static const struct {
+        const char *reading;
+        int pitch[VJO_MAX_PITCH], n_pitch;
+        const char *const *pos;
+        int n_pos;
+        const char *want;
+    } cases[] = {
+        {"きのう", {2}, 1, noun, 1, "nakadaka"},
+        {"あした", {0, 3}, 2, noun, 1, "heiban,odaka"},
+        {"きゃく", {2}, 1, noun, 1, "odaka"}, /* きゃ is one mora */
+        {"いえ", {1, 1}, 2, noun, 1, "atamadaka"},
+        {"よむ", {1}, 1, verb, 2, "kifuku"},
+        {"きわどい", {3}, 1, adj, 1, "kifuku"},
+        {"べんきょう", {0, 2}, 2, suru, 2, "heiban,nakadaka"}, /* a noun with する: not a verb */
+        {"ねこ", {0}, 0, noun, 1, ""},
+    };
+    VjoBuf b;
+    setup();
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        vjo_buf_init(&b, &A);
+        vjo_anki_pitch_categories(&b, cases[i].reading, cases[i].pitch, cases[i].n_pitch, cases[i].pos,
+                                  cases[i].n_pos);
+        TEST_CHECK(!strcmp(vjo_buf_cstr(&b), cases[i].want));
+        TEST_MSG("%s: %s", cases[i].reading, vjo_buf_cstr(&b));
+    }
+    {
+        char misc[64];
+        vjo_anki_misc_info(misc, sizeof(misc), "", 2026, 1, 2, 3, 4);
+        TEST_CHECK(!strcmp(misc, "2026-01-02 03:04"));
+    }
+}
+
 /* A dictionary result for "猫が\n好き" with tricky glosses. */
 static void anki_list(VjoEntryList *l)
 {
     VjoDictResult r;
-    const char *jp = "{\"tokens\":[[1,0,1,null],[0,1,1,null],[2,2,2,null]],\"vocabulary\":["
-                     "[1,2,3,\"が\",\"が\",50,[\"indicates subject\"]],"
-                     "[10,20,30,\"猫\",\"ねこ\",1500,[\"cat \\\"neko\\\"\",\"a\\\\b <&>\\nc\"]],"
-                     "[11,21,31,\"好き\",\"すき\",null,[\"liked\"]]]}";
+    const char *jp = "{\"tokens\":[[1,0,1,[[\"猫\",\"ねこ\"]]],[0,1,1,null],[2,2,2,[[\"好\",\"す\"],\"き\"]]],"
+                     "\"vocabulary\":["
+                     "[1,2,3,\"が\",\"が\",50,[\"indicates subject\"],[\"prt\"],[\"LH\"]],"
+                     "[10,20,30,\"猫\",\"ねこ\",1500,[\"cat \\\"neko\\\"\",\"a\\\\b <&>\\nc\"],[\"n\"],[\"HLL\"]],"
+                     "[11,21,31,\"好き\",\"すき\",null,[\"liked\"],[\"adj-na\",\"n\"],[\"LHL\",\"HLL\"]]]}";
     TEST_ASSERT(vjo_jpdb_parse_response(&A, jp, strlen(jp), &r) == 0);
     TEST_ASSERT(vjo_entries_build(&A, "猫が\n好き", &r, l) == 0);
 }
@@ -131,7 +168,7 @@ static void test_anki_requests(void)
     VjoAnkiNote n;
     VjoAnkiMedia m = {(const uint8_t *)"jpeg", 4, "vitajp_1.jpg", NULL, NULL};
     VjoAnkiBody b;
-    char *s;
+    char *s, misc[96];
     setup();
     vjo_config_defaults(&cfg);
     snprintf(cfg.anki_deck, sizeof(cfg.anki_deck), "Japanese::Mining \"1\"");
@@ -149,12 +186,19 @@ static void test_anki_requests(void)
 
     TEST_ASSERT(vjo_anki_note_from_entry(&A, &l, 0, &n) == 0);
     TEST_CHECK(vjo_anki_note_from_entry(&A, &l, 3, &n) < 0);
+    vjo_anki_misc_info(misc, sizeof(misc), "Persona 4 <Golden>", 2026, 10, 11, 9, 5);
+    n.misc = misc;
     TEST_ASSERT(vjo_anki_add_request(&A, &cfg, &n, &m, &b) == 0);
     TEST_CHECK(!strcmp(b.prefix,
                        "{\"action\":\"addNote\",\"version\":6,\"params\":{\"note\":{" TARGET ",\"fields\":{"
                        "\"Expression\":\"猫\",\"ExpressionReading\":\"ねこ\",\"ExpressionFurigana\":\"猫[ねこ]\","
                        "\"MainDefinition\":\"<ol><li>cat &quot;neko&quot;</li><li>a\\\\b &lt;&amp;&gt;\\nc</li></ol>\","
-                       "\"Sentence\":\"<b>猫</b>が<br>好き\",\"FreqSort\":\"1500\"},"
+                       "\"Sentence\":\"<b>猫</b>が<br>好き\",\"FreqSort\":\"1500\","
+                       "\"SentenceFurigana\":\"<b> 猫[ねこ]</b>が<br> 好[す]き\","
+                       "\"PitchPosition\":\"<span style=\\\"display:inline;\\\"><span>[</span><span>1</span>"
+                       "<span>]</span></span>\",\"PitchCategories\":\"atamadaka\","
+                       "\"Frequency\":\"<ul style=\\\"text-align: left;\\\"><li>Jiten: 1500</li></ul>\","
+                       "\"MiscInfo\":\"Persona 4 &lt;Golden&gt; (2026-10-11 09:05)\"},"
                        "\"tags\":[\"vita\",\"jp-overlay\"]," OPTS ","
                        "\"picture\":[{\"filename\":\"vitajp_1.jpg\",\"fields\":[\"Picture\"],\"data\":\""));
     TEST_MSG("%s", b.prefix);
@@ -165,7 +209,7 @@ static void test_anki_requests(void)
     m.audio_url = "https://example.com/a \"b\".opus";
     m.audio_name = "vitajp_1.opus";
     TEST_ASSERT(vjo_anki_add_request(&A, &cfg, &n, &m, &b) == 0);
-    TEST_CHECK(strstr(b.prefix, "\"FreqSort\":\"1500\"},") && !strstr(b.prefix, "ExpressionAudio\":\""));
+    TEST_CHECK(strstr(b.prefix, "(2026-10-11 09:05)\"},") && !strstr(b.prefix, "ExpressionAudio\":\""));
     TEST_CHECK(strstr(b.prefix, OPTS ",\"audio\":[{\"filename\":\"vitajp_1.opus\",\"fields\":[\"ExpressionAudio\"],"
                                 "\"url\":\"https://example.com/a \\\"b\\\".opus\"}],"
                                 "\"picture\":[{\"filename\":\"vitajp_1.jpg\"") != NULL);
@@ -180,11 +224,16 @@ static void test_anki_requests(void)
     cfg.anki_field[VJO_ANKI_DEFINITION][0] = '\0';
     cfg.anki_field[VJO_ANKI_SENTENCE][0] = '\0';
     cfg.anki_field[VJO_ANKI_PICTURE][0] = '\0';
+    cfg.anki_field[VJO_ANKI_SENTENCE_FURIGANA][0] = '\0';
+    cfg.anki_field[VJO_ANKI_PITCH_CATEGORIES][0] = '\0';
     cfg.anki_tags[0] = '\0';
     TEST_ASSERT(vjo_anki_note_from_entry(&A, &l, 2, &n) == 0);
     TEST_ASSERT(vjo_anki_add_request(&A, &cfg, &n, &m, &b) == 0);
     TEST_CHECK(!strcmp(b.prefix, "{\"action\":\"addNote\",\"version\":6,\"params\":{\"note\":{" TARGET
-                                 ",\"fields\":{\"Expression\":\"好き\"},\"tags\":[]," OPTS "}}}"));
+                                 ",\"fields\":{\"Expression\":\"好き\",\"PitchPosition\":\"<ol>"
+                                 "<li><span style=\\\"display:inline;\\\"><span>[</span><span>2</span><span>]</span></span></li>"
+                                 "<li><span style=\\\"display:inline;\\\"><span>[</span><span>1</span><span>]</span></span></li>"
+                                 "</ol>\"},\"tags\":[]," OPTS "}}}"));
     TEST_MSG("%s", b.prefix);
     TEST_CHECK(b.suffix_len == 0 && b.picture_len == 0);
     cfg.anki_field[VJO_ANKI_WORD][0] = '\0';
@@ -680,6 +729,7 @@ TEST_LIST = {
     {"base64", test_base64},
     {"anki_fields", test_anki_fields},
     {"anki_requests", test_anki_requests},
+    {"anki_pitch", test_anki_pitch},
     {"anki_probe", test_anki_probe},
     {"anki_check", test_anki_check},
     {"anki_add", test_anki_add},

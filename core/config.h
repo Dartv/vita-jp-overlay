@@ -20,6 +20,11 @@ enum {
     VJO_ANKI_PICTURE,    /* screenshot */
     VJO_ANKI_FREQUENCY,  /* frequency rank */
     VJO_ANKI_AUDIO,      /* the word's pronunciation, downloaded by Anki */
+    VJO_ANKI_SENTENCE_FURIGANA, /* the sentence in 漢字[かんじ] syntax, the word in <b> */
+    VJO_ANKI_PITCH_POSITION,    /* [2], as Yomitan writes it */
+    VJO_ANKI_PITCH_CATEGORIES,  /* heiban,kifuku */
+    VJO_ANKI_FREQUENCY_LIST,    /* <ul><li>Jiten: 384</li></ul> */
+    VJO_ANKI_MISC_INFO,         /* the game and the date */
     VJO_ANKI_FIELD_COUNT
 };
 
