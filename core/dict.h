@@ -11,7 +11,7 @@ typedef struct {
     int rank;             /* VJO_NO_RANK if unknown */
     const char **meanings;
     int n_meanings;
-    const char *ruby;     /* jiten: the dictionary form, "雨[あめ]が降[ふ]る"; NULL for jpdb */
+    const char *ruby;     /* the dictionary form in ruby markup, "雨[あめ]が降[ふ]る"; NULL if none */
     const char **pos;     /* part-of-speech codes: "n", "v5r", "adj-i", ... */
     int n_pos;
     int pitch[VJO_MAX_PITCH]; /* downstep mora, 0 = heiban */
@@ -21,7 +21,7 @@ typedef struct {
 typedef struct {
     int vocab;          /* index into vocabulary, -1 if none */
     int pos16, len16;   /* UTF-16 units into the request text */
-    const char *furigana; /* jpdb: the text as written, " 降[ふ]っていた"; NULL for jiten */
+    const char *furigana; /* the text as written in ruby markup, "降[ふ]っていた"; NULL if none */
 } VjoToken;
 
 typedef struct {
@@ -29,6 +29,7 @@ typedef struct {
     int n_vocab;
     VjoToken *tokens;
     int n_tokens;
+    const char *source; /* frequency source name: "jpdb" | "Jiten" */
 } VjoDictResult;
 
 #endif

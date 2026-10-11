@@ -8,10 +8,11 @@
 #include "arena.h"
 
 /* The n bytes of surface (a word as written: "来た") with readings taken
- * from its dictionary form's ruby (jiten: "来[く]る"). Each kanji run of
- * the surface takes the reading of the same kanji in the ruby; 来 read く
- * becomes き or こ by the kana after it; a run the ruby has no reading
- * for is left without one. NULL on OOM. */
+ * from ruby markup: the token's own (jpdb: "来[き]た") or its dictionary
+ * form's (jiten: "来[く]る"). Each kanji of the surface takes the reading
+ * of the same kanji in the ruby; a dictionary-form reading that changes
+ * with conjugation (来 く -> き/こ, 良 い -> よ) follows the kana after it;
+ * kanji the ruby has no reading for are left without one. NULL on OOM. */
 char *vjo_furigana_align(VjoArena *a, const char *surface, size_t n, const char *ruby);
 
 #endif

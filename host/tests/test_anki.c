@@ -8,6 +8,7 @@
 #include "anki.h"
 #include "base64.h"
 #include "config.h"
+#include "jiten.h"
 #include "jpdb.h"
 #include "replay.h"
 
@@ -110,7 +111,7 @@ static void test_anki_fields(void)
 static void test_anki_pitch(void)
 {
     static const char *const noun[] = {"n"}, *const verb[] = {"v5m", "vt"}, *const suru[] = {"n", "vs"},
-                             *const adj[] = {"adj-i"};
+                             *const adj[] = {"adj-i"}, *const adj_ix[] = {"adj-ix"};
     static const struct {
         const char *reading;
         int pitch[VJO_MAX_PITCH], n_pitch;
@@ -124,6 +125,7 @@ static void test_anki_pitch(void)
         {"いえ", {1, 1}, 2, noun, 1, "atamadaka"},
         {"よむ", {1}, 1, verb, 2, "kifuku"},
         {"きわどい", {3}, 1, adj, 1, "kifuku"},
+        {"いい", {1}, 1, adj_ix, 1, "kifuku"},
         {"べんきょう", {0, 2}, 2, suru, 2, "heiban,nakadaka"}, /* a noun with する: not a verb */
         {"ねこ", {0}, 0, noun, 1, ""},
     };
@@ -138,8 +140,13 @@ static void test_anki_pitch(void)
     }
     {
         char misc[64];
-        vjo_anki_misc_info(misc, sizeof(misc), "", 2026, 1, 2, 3, 4);
+        VjoAnkiDate when = {2026, 1, 2, 3, 4};
+        vjo_anki_misc_info(misc, sizeof(misc), "", &when);
         TEST_CHECK(!strcmp(misc, "2026-01-02 03:04"));
+        vjo_anki_misc_info(misc, sizeof(misc), "ペルソナ", NULL); /* no clock: no date */
+        TEST_CHECK(!strcmp(misc, "ペルソナ"));
+        vjo_anki_misc_info(misc, 8, "ペルソナ", NULL); /* cut on a character: "ペル" is 6 bytes */
+        TEST_CHECK(!strcmp(misc, "ペル"));
     }
 }
 
@@ -160,6 +167,56 @@ static void anki_list(VjoEntryList *l)
     "\"options\":{\"allowDuplicate\":false,\"duplicateScope\":\"deck\",\"duplicateScopeOptions\":"            \
     "{\"deckName\":\"Japanese::Mining \\\"1\\\"\",\"checkChildren\":false,\"checkAllModels\":false}}"
 #define TARGET "\"deckName\":\"Japanese::Mining \\\"1\\\"\",\"modelName\":\"Lapis\""
+
+/* jiten: furigana lined up from the dictionary form inside the sentence;
+ * an overlapping token and a word without one are skipped. */
+static void test_anki_sentence_furigana_jiten(void)
+{
+    const char *js =
+        "{\"tokens\":[[{\"wordId\":1,\"readingIndex\":0,\"start\":0,\"length\":1},"
+        "{\"wordId\":2,\"readingIndex\":0,\"start\":1,\"length\":1},"
+        "{\"wordId\":3,\"readingIndex\":0,\"start\":2,\"length\":5},"
+        "{\"wordId\":4,\"readingIndex\":0,\"start\":3,\"length\":1}]],"
+        "\"vocabulary\":["
+        "{\"wordId\":1,\"readingIndex\":0,\"spelling\":\"彼\",\"reading\":\"彼[かれ]\",\"frequencyRank\":299,"
+        "\"meaningsChunks\":[[\"he\"]],\"meaningsPartOfSpeech\":[\"pn\"],\"pitchAccents\":[1]},"
+        "{\"wordId\":2,\"readingIndex\":0,\"spelling\":\"は\",\"reading\":\"は\",\"meaningsChunks\":[[\"topic\"]]},"
+        "{\"wordId\":3,\"readingIndex\":0,\"spelling\":\"来る\",\"reading\":\"来[く]る\",\"frequencyRank\":59,"
+        "\"meaningsChunks\":[[\"to come\"]],\"meaningsPartOfSpeech\":[\"vk\",\"vi\",\"vk\"],\"pitchAccents\":[1]},"
+        "{\"wordId\":4,\"readingIndex\":0,\"spelling\":\"な\",\"reading\":\"な\",\"meaningsChunks\":[[\"x\"]]},"
+        "{\"wordId\":5,\"readingIndex\":0,\"spelling\":\"雨\",\"reading\":\"雨[あめ]\",\"meaningsChunks\":[[\"rain\"]]}]}";
+    VjoConfig cfg;
+    VjoDictResult r;
+    VjoEntryList l;
+    VjoAnkiNote n;
+    VjoAnkiMedia none = {0};
+    VjoAnkiBody b;
+    int kuru = -1, ame = -1;
+    setup();
+    vjo_config_defaults(&cfg);
+    TEST_ASSERT(vjo_jiten_parse_response(&A, js, strlen(js), &r) == 0);
+    TEST_ASSERT(vjo_entries_build(&A, "彼は来なかった。", &r, &l) == 0);
+    for (int i = 0; i < l.n_entries; i++) {
+        if (!strcmp(l.entries[i].vocab->spelling, "来る"))
+            kuru = i;
+        if (!strcmp(l.entries[i].vocab->spelling, "雨"))
+            ame = i;
+    }
+    TEST_ASSERT(kuru >= 0 && ame >= 0);
+    TEST_ASSERT(vjo_anki_note_from_entry(&A, &cfg, &l, kuru, &n) == 0);
+    TEST_ASSERT(vjo_anki_add_request(&A, &cfg, &n, &none, &b) == 0);
+    TEST_CHECK(strstr(b.prefix, "\"SentenceFurigana\":\"彼[かれ]は<b> 来[こ]なかった</b>。\"") != NULL);
+    TEST_CHECK(strstr(b.prefix, "\"PitchCategories\":\"kifuku\"") != NULL);
+    TEST_CHECK(strstr(b.prefix, "<li>Jiten: 59</li>") != NULL);
+    TEST_MSG("%s", b.prefix);
+    /* a word without a token: nothing in bold */
+    TEST_ASSERT(vjo_anki_note_from_entry(&A, &cfg, &l, ame, &n) == 0);
+    TEST_CHECK(n.sf_hl_start < 0 && !strcmp(n.sentence_furigana, "彼[かれ]は 来[こ]なかった。"));
+    /* no field for it: not made */
+    cfg.anki_field[VJO_ANKI_SENTENCE_FURIGANA][0] = '\0';
+    TEST_ASSERT(vjo_anki_note_from_entry(&A, &cfg, &l, kuru, &n) == 0);
+    TEST_CHECK(n.sentence_furigana == NULL);
+}
 
 static void test_anki_requests(void)
 {
@@ -184,9 +241,12 @@ static void test_anki_requests(void)
     s = vjo_anki_can_add_request(&A, &cfg, &l, 1); /* the first n only */
     TEST_CHECK(s && strstr(s, "猫") && !strstr(s, "が"));
 
-    TEST_ASSERT(vjo_anki_note_from_entry(&A, &l, 0, &n) == 0);
-    TEST_CHECK(vjo_anki_note_from_entry(&A, &l, 3, &n) < 0);
-    vjo_anki_misc_info(misc, sizeof(misc), "Persona 4 <Golden>", 2026, 10, 11, 9, 5);
+    TEST_ASSERT(vjo_anki_note_from_entry(&A, &cfg, &l, 0, &n) == 0);
+    TEST_CHECK(vjo_anki_note_from_entry(&A, &cfg, &l, 3, &n) < 0);
+    {
+        VjoAnkiDate when = {2026, 10, 11, 9, 5};
+        vjo_anki_misc_info(misc, sizeof(misc), "Persona 4 <Golden>", &when);
+    }
     n.misc = misc;
     TEST_ASSERT(vjo_anki_add_request(&A, &cfg, &n, &m, &b) == 0);
     TEST_CHECK(!strcmp(b.prefix,
@@ -194,10 +254,10 @@ static void test_anki_requests(void)
                        "\"Expression\":\"猫\",\"ExpressionReading\":\"ねこ\",\"ExpressionFurigana\":\"猫[ねこ]\","
                        "\"MainDefinition\":\"<ol><li>cat &quot;neko&quot;</li><li>a\\\\b &lt;&amp;&gt;\\nc</li></ol>\","
                        "\"Sentence\":\"<b>猫</b>が<br>好き\",\"FreqSort\":\"1500\","
-                       "\"SentenceFurigana\":\"<b> 猫[ねこ]</b>が<br> 好[す]き\","
+                       "\"SentenceFurigana\":\"<b>猫[ねこ]</b>が<br> 好[す]き\","
                        "\"PitchPosition\":\"<span style=\\\"display:inline;\\\"><span>[</span><span>1</span>"
                        "<span>]</span></span>\",\"PitchCategories\":\"atamadaka\","
-                       "\"Frequency\":\"<ul style=\\\"text-align: left;\\\"><li>Jiten: 1500</li></ul>\","
+                       "\"Frequency\":\"<ul style=\\\"text-align: left;\\\"><li>jpdb: 1500</li></ul>\","
                        "\"MiscInfo\":\"Persona 4 &lt;Golden&gt; (2026-10-11 09:05)\"},"
                        "\"tags\":[\"vita\",\"jp-overlay\"]," OPTS ","
                        "\"picture\":[{\"filename\":\"vitajp_1.jpg\",\"fields\":[\"Picture\"],\"data\":\""));
@@ -227,7 +287,7 @@ static void test_anki_requests(void)
     cfg.anki_field[VJO_ANKI_SENTENCE_FURIGANA][0] = '\0';
     cfg.anki_field[VJO_ANKI_PITCH_CATEGORIES][0] = '\0';
     cfg.anki_tags[0] = '\0';
-    TEST_ASSERT(vjo_anki_note_from_entry(&A, &l, 2, &n) == 0);
+    TEST_ASSERT(vjo_anki_note_from_entry(&A, &cfg, &l, 2, &n) == 0);
     TEST_ASSERT(vjo_anki_add_request(&A, &cfg, &n, &m, &b) == 0);
     TEST_CHECK(!strcmp(b.prefix, "{\"action\":\"addNote\",\"version\":6,\"params\":{\"note\":{" TARGET
                                  ",\"fields\":{\"Expression\":\"好き\",\"PitchPosition\":\"<ol>"
@@ -380,7 +440,7 @@ static void test_anki_add(void)
     setup();
     vjo_config_defaults(&cfg);
     anki_list(&l);
-    TEST_ASSERT(vjo_anki_note_from_entry(&A, &l, 0, &n) == 0);
+    TEST_ASSERT(vjo_anki_note_from_entry(&A, &cfg, &l, 0, &n) == 0);
     for (int i = 0; i < 100; i++)
         jpeg[i] = (uint8_t)(255 - i);
     vjo_base64_encode(jpeg, sizeof(jpeg), b64);
@@ -535,7 +595,7 @@ static void test_anki_find_audio(void)
     setup();
     vjo_config_defaults(&cfg);
     anki_list(&l);
-    TEST_ASSERT(vjo_anki_note_from_entry(&A, &l, 0, &n) == 0);
+    TEST_ASSERT(vjo_anki_note_from_entry(&A, &cfg, &l, 0, &n) == 0);
 #define FIND() vjo_anki_find_audio(&A, &p, &cfg, &n, now, &m, &err)
 #define WORKER "https://my-audio.example.workers.dev/audio/list?term={term}&reading={reading}&apiKey=k"
     snprintf(cfg.anki_audio_url, sizeof(cfg.anki_audio_url), WORKER);
@@ -730,6 +790,7 @@ TEST_LIST = {
     {"anki_fields", test_anki_fields},
     {"anki_requests", test_anki_requests},
     {"anki_pitch", test_anki_pitch},
+    {"anki_sentence_furigana_jiten", test_anki_sentence_furigana_jiten},
     {"anki_probe", test_anki_probe},
     {"anki_check", test_anki_check},
     {"anki_add", test_anki_add},

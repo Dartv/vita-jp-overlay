@@ -14,6 +14,7 @@
 #include <psp2/rtc.h>
 
 #include "../core/anki.h"
+#include "../core/utf.h"
 #include "shell.h"
 
 #define ANKI_MEM_SIZE (384 * 1024)
@@ -75,6 +76,7 @@ void vjo_anki_set_game(const char *name)
         return;
     sceKernelLockMutex(box_lock, 1, NULL);
     sceClibSnprintf(game_name, sizeof(game_name), "%s", name);
+    vjo_utf8_trim_partial(game_name);
     sceKernelUnlockMutex(box_lock, 1);
 }
 
@@ -338,9 +340,12 @@ static void misc_info(char *out, size_t cap)
     sceKernelLockMutex(box_lock, 1, NULL);
     sceClibMemcpy(game, game_name, sizeof(game));
     sceKernelUnlockMutex(box_lock, 1);
-    if (sceRtcGetCurrentClockLocalTime(&t) < 0)
-        sceClibMemset(&t, 0, sizeof(t));
-    vjo_anki_misc_info(out, cap, game, t.year, t.month, t.day, t.hour, t.minute);
+    if (sceRtcGetCurrentClockLocalTime(&t) < 0) {
+        vjo_anki_misc_info(out, cap, game, NULL); /* no date rather than a wrong one */
+        return;
+    }
+    VjoAnkiDate when = {t.year, t.month, t.day, t.hour, t.minute};
+    vjo_anki_misc_info(out, cap, game, &when);
 }
 
 /* The game's frame when × was pressed, into m. */
@@ -377,7 +382,7 @@ static void do_add(unsigned seq, int entry)
     vjo_view_lock();
     if (g_view.open && g_view.list_seq == seq && g_view.list && entry >= 0 && entry < g_view.list->n_entries) {
         marked = entry < VJO_MAX_ENTRIES && g_view.anki_marks_seq == seq && g_view.anki_mark[entry];
-        ok = marked || vjo_anki_note_from_entry(&arena, g_view.list, entry, &note) == 0;
+        ok = marked || vjo_anki_note_from_entry(&arena, &acfg, g_view.list, entry, &note) == 0;
     }
     vjo_view_unlock();
     if (!ok)

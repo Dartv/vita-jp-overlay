@@ -6,6 +6,10 @@
 
 #include "shell.h"
 
+#include "../core/utf.h"
+
+#define PSP_EMULATOR "NPXS10028" /* where Adrenaline's games run */
+
 int sceKernelGetProcessTitleId(SceUID pid, char *titleid, SceSize len); /* SceProcessmgr, not in headers */
 
 int vjo_title_id(SceUID pid, char *tid, int size)
@@ -24,7 +28,8 @@ int vjo_title_id(SceUID pid, char *tid, int size)
 
 /* The game's name for MiscInfo: its title (app parameter 9, else 10);
  * "PSP" for the PSP emulator, which every Adrenaline game shares; "" when
- * neither is readable. Both parameters are logged to tell them apart. */
+ * neither is readable. Both are logged until a device run shows which
+ * one is the full title. */
 void vjo_title_name(SceUID pid, const char *tid, char *name, int size)
 {
     char p9[128], p10[128];
@@ -34,7 +39,7 @@ void vjo_title_name(SceUID pid, const char *tid, char *name, int size)
     r9 = sceAppMgrAppParamGetString(pid, 9, p9, sizeof(p9) - 1);
     r10 = sceAppMgrAppParamGetString(pid, 10, p10, sizeof(p10) - 1);
     vjo_log("title %s: param 9 = \"%s\" (0x%08X), param 10 = \"%s\" (0x%08X)", tid, p9, r9, p10, r10);
-    if (!sceClibStrcmp(tid, "NPXS10028"))
+    if (!sceClibStrcmp(tid, PSP_EMULATOR))
         sceClibSnprintf(name, size, "PSP");
     else if (r9 >= 0 && p9[0])
         sceClibSnprintf(name, size, "%s", p9);
@@ -42,6 +47,7 @@ void vjo_title_name(SceUID pid, const char *tid, char *name, int size)
         sceClibSnprintf(name, size, "%s", p10);
     else
         name[0] = '\0';
+    vjo_utf8_trim_partial(name);
 }
 
 /* vjoSetGameActive's mode for a title: system apps, SceShell and VitaShell
@@ -50,7 +56,7 @@ void vjo_title_name(SceUID pid, const char *tid, char *name, int size)
  * share its title ID, so one region. */
 int vjo_title_game_mode(const char *tid)
 {
-    if (!sceClibStrcmp(tid, "NPXS10028"))
+    if (!sceClibStrcmp(tid, PSP_EMULATOR))
         return VJO_GAME_STATIC_FB;
     if (!sceClibStrncmp(tid, "NPXS", 4) || !sceClibStrncmp(tid, "main", 4) ||
         !sceClibStrncmp(tid, "VITASHELL", 9))

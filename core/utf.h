@@ -15,12 +15,17 @@ static inline int vjo_utf16_units(uint32_t cp) { return cp >= 0x10000 ? 2 : 1; }
 /* ASCII case-insensitive equality, and whether s starts with prefix. */
 int vjo_ieq(const char *a, const char *b);
 int vjo_ieq_prefix(const char *s, const char *prefix);
+/* Whether the n bytes at s start with prefix (exact bytes). */
+int vjo_starts_withn(const char *s, size_t n, const char *prefix);
+
+/* Cuts a UTF-8 sequence left incomplete at the end of s (by a truncating
+ * snprintf), in place. */
+void vjo_utf8_trim_partial(char *s);
 
 /* Java String.trim(): strips chars <= U+0020 from both ends, in place;
  * returns the (possibly advanced) start pointer. */
 char *vjo_java_trim(char *s);
 
-/* Japanese characters: [぀-ゟ゠-ヿ一-龯] */
 /* Kanji, as furigana bases: CJK ideographs, 々〆 and the counters ヵヶ. */
 static inline int vjo_is_kanji(uint32_t cp)
 {
@@ -29,6 +34,7 @@ static inline int vjo_is_kanji(uint32_t cp)
            cp == 0x30F5 || cp == 0x30F6 /* ヵヶ */;
 }
 
+/* Japanese characters: [぀-ゟ゠-ヿ一-龯] */
 static inline int vjo_is_japanese_char(uint32_t cp)
 {
     return (cp >= 0x3040 && cp <= 0x309F) || (cp >= 0x30A0 && cp <= 0x30FF) ||

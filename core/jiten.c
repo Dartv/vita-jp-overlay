@@ -113,31 +113,6 @@ static void parse_pitch(const VjoJson *j, int arr, VjoVocab *v)
     }
 }
 
-/* meaningsPartOfSpeech: short codes ("v5r", "adj-i"), one per sense and
- * repeated; kept once each. */
-static int parse_pos(VjoArena *a, const VjoJson *j, int arr, VjoVocab *v)
-{
-    int n;
-    v->pos = NULL;
-    v->n_pos = 0;
-    if (!vjo_json_is_type(j, arr, JSMN_ARRAY) || (n = j->t[arr].size) == 0)
-        return 0;
-    v->pos = (const char **)vjo_arena_alloc(a, sizeof(char *) * (size_t)n);
-    if (!v->pos)
-        return -1;
-    for (int k = 0; k < n; k++) {
-        const char *s = vjo_json_str(a, j, vjo_json_arr_get(j, arr, k));
-        int dup = 0;
-        if (!s)
-            return -1;
-        for (int d = 0; d < v->n_pos && !dup; d++)
-            dup = !strcmp(v->pos[d], s);
-        if (!dup)
-            v->pos[v->n_pos++] = s;
-    }
-    return 0;
-}
-
 static int parse_vocab(VjoArena *a, const VjoJson *j, int obj, VjoVocab *v)
 {
     long rank;
@@ -155,7 +130,8 @@ static int parse_vocab(VjoArena *a, const VjoJson *j, int obj, VjoVocab *v)
     rank = obj_long(j, obj, "frequencyRank", 0);
     v->rank = rank > 0 ? (int)rank : VJO_NO_RANK;
     parse_pitch(j, vjo_json_obj_get(j, obj, "pitchAccents"), v);
-    if (parse_pos(a, j, vjo_json_obj_get(j, obj, "meaningsPartOfSpeech"), v) < 0)
+    /* short codes ("v5r", "adj-i"), one per sense: each kept once */
+    if (vjo_json_str_array(a, j, vjo_json_obj_get(j, obj, "meaningsPartOfSpeech"), 1, &v->pos, &v->n_pos) < 0)
         return -1;
     return parse_meanings(a, j, vjo_json_obj_get(j, obj, "meaningsChunks"), v);
 }
@@ -168,6 +144,7 @@ int vjo_jiten_parse_response(VjoArena *a, const char *json, size_t len, VjoDictR
     int *ris;
 
     memset(out, 0, sizeof(*out));
+    out->source = "Jiten";
     if (vjo_json_parse(a, json, len, &j) < 0)
         return -1;
     voc = vjo_json_obj_get(&j, 0, "vocabulary");

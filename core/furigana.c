@@ -47,12 +47,6 @@ static int pieces(const char *ruby, Piece *out)
     return n;
 }
 
-static int starts_with(const char *s, size_t n, const char *prefix)
-{
-    size_t k = strlen(prefix);
-    return n >= k && !memcmp(s, prefix, k);
-}
-
 /* 来 read く (来る) as conjugated: き before た/て/ま/ち (来た, 来ます,
  * 来ちゃう), こ before な/ず/さ/ら/い/よ and れ except in れば (来ない,
  * 来させる, 来られる, 来い, 来よう, 来れる); else く (来る, 来れば). */
@@ -61,15 +55,31 @@ static const char *kuru(const char *next, size_t n)
     static const char *const ki[] = {"た", "て", "ま", "ち"};
     static const char *const ko[] = {"な", "ず", "さ", "ら", "い", "よ"};
     for (unsigned k = 0; k < sizeof(ki) / sizeof(ki[0]); k++)
-        if (starts_with(next, n, ki[k]))
+        if (vjo_starts_withn(next, n, ki[k]))
             return "き";
     for (unsigned k = 0; k < sizeof(ko) / sizeof(ko[0]); k++)
-        if (starts_with(next, n, ko[k]))
+        if (vjo_starts_withn(next, n, ko[k]))
             return "こ";
-    if (starts_with(next, n, "れ") && !starts_with(next, n, "れば"))
+    if (vjo_starts_withn(next, n, "れ") && !vjo_starts_withn(next, n, "れば"))
         return "こ";
     return NULL;
 }
+
+/* 良い read いい: only the plain form is いい; 良かった, 良く, 良さ are よ. */
+static const char *ii(const char *next, size_t n)
+{
+    return vjo_starts_withn(next, n, "い") ? NULL : "よ";
+}
+
+/* Kanji whose reading in the dictionary form changes with conjugation:
+ * the reading for the kana after it, NULL = the dictionary's. */
+static const struct {
+    const char *base, *reading;
+    const char *(*conjugated)(const char *next, size_t n);
+} irregular[] = {
+    {"来", "く", kuru},
+    {"良", "い", ii},
+};
 
 static void put_ruby(VjoBuf *b, const char *base, size_t base_len, const char *reading, size_t reading_len)
 {
@@ -78,6 +88,25 @@ static void put_ruby(VjoBuf *b, const char *base, size_t base_len, const char *r
     vjo_buf_putc(b, '[');
     vjo_buf_append(b, reading, reading_len);
     vjo_buf_putc(b, ']');
+}
+
+static int piece_is(const Piece *p, const char *base, const char *reading)
+{
+    return p->base_len == strlen(base) && !memcmp(p->base, base, p->base_len) &&
+           p->reading_len == strlen(reading) && !memcmp(p->reading, reading, p->reading_len);
+}
+
+/* p's base and reading, or the irregular reading for the kana after it. */
+static void put_reading(VjoBuf *b, const Piece *p, const char *next, size_t n)
+{
+    for (unsigned k = 0; k < sizeof(irregular) / sizeof(irregular[0]); k++) {
+        const char *r;
+        if (piece_is(p, irregular[k].base, irregular[k].reading) && (r = irregular[k].conjugated(next, n))) {
+            put_ruby(b, p->base, p->base_len, r, strlen(r));
+            return;
+        }
+    }
+    put_ruby(b, p->base, p->base_len, p->reading, p->reading_len);
 }
 
 char *vjo_furigana_align(VjoArena *a, const char *surface, size_t n, const char *ruby)
@@ -108,15 +137,7 @@ char *vjo_furigana_align(VjoArena *a, const char *surface, size_t n, const char 
         }
         i = s + p[found].base_len;
         next_piece = found + 1;
-        if (p[found].reading_len == strlen("く") && !memcmp(p[found].reading, "く", p[found].reading_len) &&
-            p[found].base_len == strlen("来") && !memcmp(p[found].base, "来", p[found].base_len)) {
-            const char *r = kuru(surface + i, n - i);
-            if (r) {
-                put_ruby(&b, p[found].base, p[found].base_len, r, strlen(r));
-                continue;
-            }
-        }
-        put_ruby(&b, p[found].base, p[found].base_len, p[found].reading, p[found].reading_len);
+        put_reading(&b, &p[found], surface + i, n - i);
     }
     if (b.oom)
         return NULL;

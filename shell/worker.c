@@ -727,10 +727,9 @@ static int64_t pending_since;
 
 static void activate_game(SceUID pid, const char *tid, int mode)
 {
-    char name[128] = "";
+    char name[128];
     sceClibSnprintf(title_id, sizeof(title_id), "%s", tid);
-    if (sceClibStrcmp(tid, "GAME"))
-        vjo_title_name(pid, tid, name, sizeof(name));
+    vjo_title_name(pid, tid, name, sizeof(name)); /* "" for an unreadable title */
     vjo_anki_set_game(name);
     if (mem_uid < 0)
         mem_alloc();

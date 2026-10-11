@@ -101,12 +101,12 @@ static int run_anki(VjoArena *a, VjoArena *fa, const VjoPlatform *p, const VjoCo
         localtime_r(&t, &lt);
         gettimeofday(&tv, NULL);
         now = (uint64_t)tv.tv_sec * 1000u + (uint64_t)(tv.tv_usec / 1000);
-        if (vjo_anki_note_from_entry(a, l, add - 1, &n) < 0) {
+        if (vjo_anki_note_from_entry(a, cfg, l, add - 1, &n) < 0) {
             fprintf(stderr, "--anki-add: no entry %d\n", add);
             return 1;
         }
-        vjo_anki_misc_info(misc, sizeof(misc), game, lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday, lt.tm_hour,
-                           lt.tm_min);
+        VjoAnkiDate when = {lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min};
+        vjo_anki_misc_info(misc, sizeof(misc), game, &when);
         n.misc = misc;
         if (picture) {
             if (!(m.picture = (const uint8_t *)vjo_read_file(fa, picture, &m.picture_len))) {

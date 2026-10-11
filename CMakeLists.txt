@@ -18,7 +18,7 @@ set(CORE_SRC
   core/arena.c core/pb.c core/utf.c core/lens.c core/json.c core/jpdb.c
   core/textfilter.c core/entries.c core/jiten.c core/config.c core/regions.c
   core/http.c core/tls.c core/tls_roots.c core/client.c core/styled.c core/jpegsw.c
-  core/base64.c core/anki.c core/net.c core/furigana.c)
+  core/base64.c core/anki.c core/net.c core/furigana.c core/pitch.c)
 add_library(vjo_core STATIC ${CORE_SRC})
 target_include_directories(vjo_core PUBLIC core include)
 target_link_libraries(vjo_core PUBLIC bearssl)
