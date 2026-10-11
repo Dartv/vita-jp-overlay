@@ -87,6 +87,8 @@ int vjo_capture_jpeg(VjoArena *a, uint32_t flags, int quality, VjoBuf *out, VjoS
 /* game.c */
 /* The process's title ID; 0, or < 0 when not readable (yet). */
 int vjo_title_id(SceUID pid, char *tid, int size);
+/* The game's name for Anki's MiscInfo ("" if unknown). */
+void vjo_title_name(SceUID pid, const char *tid, char *name, int size);
 /* vjoSetGameActive's mode (enum VjoGameMode) for a title ID. */
 int vjo_title_game_mode(const char *tid);
 
@@ -97,6 +99,8 @@ void vjo_anki_stop(void);
 void vjo_anki_configure(const VjoConfig *cfg);
 /* Duplicate pre-check of the published list list_seq (control thread). */
 void vjo_anki_post_check(unsigned list_seq);
+/* The running game's name for MiscInfo ("" = none; control thread). */
+void vjo_anki_set_game(const char *name);
 /* Adds entry `entry` of list list_seq (overlay, × pressed). */
 void vjo_anki_post_add(unsigned list_seq, int entry);
 

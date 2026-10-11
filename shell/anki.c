@@ -28,6 +28,7 @@ static volatile int running;
 
 /* mailbox (box_lock) */
 static VjoConfig next_cfg;
+static char game_name[128];
 static int want_check, want_add;
 static unsigned check_seq, add_seq;
 static int add_entry;
@@ -66,6 +67,15 @@ void vjo_anki_post_check(unsigned list_seq)
     check_seq = list_seq;
     sceKernelUnlockMutex(box_lock, 1);
     sceKernelSetEventFlag(evf, EV_WORK);
+}
+
+void vjo_anki_set_game(const char *name)
+{
+    if (box_lock < 0)
+        return;
+    sceKernelLockMutex(box_lock, 1, NULL);
+    sceClibSnprintf(game_name, sizeof(game_name), "%s", name);
+    sceKernelUnlockMutex(box_lock, 1);
 }
 
 void vjo_anki_post_add(unsigned list_seq, int entry)
@@ -320,6 +330,19 @@ static uint64_t unix_ms(void)
     return t.tick / 1000ull - 62135596800000ull; /* microseconds since 0001-01-01 UTC */
 }
 
+/* MiscInfo: the game's name and the local time. */
+static void misc_info(char *out, size_t cap)
+{
+    char game[sizeof(game_name)];
+    SceDateTime t;
+    sceKernelLockMutex(box_lock, 1, NULL);
+    sceClibMemcpy(game, game_name, sizeof(game));
+    sceKernelUnlockMutex(box_lock, 1);
+    if (sceRtcGetCurrentClockLocalTime(&t) < 0)
+        sceClibMemset(&t, 0, sizeof(t));
+    vjo_anki_misc_info(out, cap, game, t.year, t.month, t.day, t.hour, t.minute);
+}
+
 /* The game's frame when × was pressed, into m. */
 static void take_screenshot(VjoAnkiMedia *m, char *name, size_t cap)
 {
@@ -347,7 +370,7 @@ static void do_add(unsigned seq, int entry)
     VjoAnkiMedia media;
     AddOp o = {&note, &media};
     VjoErr err, audio_err;
-    char picture_name[40], msg[sizeof(g_view.anki_status)];
+    char picture_name[40], misc[sizeof(game_name) + 24], msg[sizeof(g_view.anki_status)];
     int ok = 0, marked = 0, rc, want_picture, want_audio;
     int64_t t0 = now_us();
 
@@ -362,6 +385,8 @@ static void do_add(unsigned seq, int entry)
     if (marked)
         return; /* the ✓ already says so */
     publish(seq, "Adding…", VJO_ANKI_STATUS_DIM, -1);
+    misc_info(misc, sizeof(misc));
+    note.misc = misc;
 
     sceClibMemset(&media, 0, sizeof(media));
     want_picture = acfg.anki_field[VJO_ANKI_PICTURE][0] != '\0';

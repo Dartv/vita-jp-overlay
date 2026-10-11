@@ -727,7 +727,11 @@ static int64_t pending_since;
 
 static void activate_game(SceUID pid, const char *tid, int mode)
 {
+    char name[128] = "";
     sceClibSnprintf(title_id, sizeof(title_id), "%s", tid);
+    if (sceClibStrcmp(tid, "GAME"))
+        vjo_title_name(pid, tid, name, sizeof(name));
+    vjo_anki_set_game(name);
     if (mem_uid < 0)
         mem_alloc();
     apply_config();
@@ -772,6 +776,7 @@ static void on_game_exit(void)
     if (!net_busy())
         mem_free();
     title_id[0] = '\0';
+    vjo_anki_set_game("");
 }
 
 /* A new foreground process: classified by classify_pending. */
